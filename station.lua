@@ -84,6 +84,28 @@ local function findRecipe(id)
     return nil
 end
 
+-- Resolve tag-style ingredient names to concrete item IDs.
+local TAG_MAP = {
+    ["c:dusts/redstone"]        = "minecraft:redstone",
+    ["c:rods/wooden"]           = "minecraft:stick",
+    ["c:ingots/iron"]           = "minecraft:iron_ingot",
+    ["c:ingots/gold"]           = "minecraft:gold_ingot",
+    ["c:ingots/copper"]         = "minecraft:copper_ingot",
+    ["c:ingots/zinc"]           = "create:zinc_ingot",
+    ["c:ingots/brass"]          = "create:brass_ingot",
+    ["c:nuggets/iron"]          = "minecraft:iron_nugget",
+    ["c:nuggets/gold"]          = "minecraft:gold_nugget",
+    ["c:andesite_alloys"]       = "create:andesite_alloy",
+    ["c:cogwheels"]             = "create:cogwheel",
+    ["c:large_cogwheels"]       = "create:large_cogwheel",
+}
+
+local function resolveItem(name)
+    if type(name) ~= "string" then return name end
+    local key = name:gsub("^TODO:", "")
+    return TAG_MAP[key] or key
+end
+
 -- ── Crafting logic ──────────────────────────────────────────
 
 -- Wait until all required items are present in the staging barrel.
@@ -97,7 +119,8 @@ local function waitForItems(recipe, qty, timeout)
     -- Build total-needed map (merge duplicate items across slots).
     local needed = {}
     for _, ing in ipairs(recipe.ingredients) do
-        needed[ing.item] = (needed[ing.item] or 0) + ing.count * qty
+        local item = resolveItem(ing.item)
+        needed[item] = (needed[item] or 0) + ing.count * qty
     end
 
     while os.epoch("utc") < deadline do
@@ -124,16 +147,17 @@ end
 local function loadCrafter(recipe, qty)
     local crafterName = cfg.crafter_name
     for _, ing in ipairs(recipe.ingredients) do
+        local itemName = resolveItem(ing.item)
         local needed = ing.count * qty
         local loaded = 0
         for srcSlot, stack in pairs(inputChest.list()) do
             if loaded >= needed then break end
-            if stack.name == ing.item then
+            if stack.name == itemName then
                 local toMove = math.min(needed - loaded, stack.count)
                 local moved  = inputChest.pushItems(
                                    cfg.crafter_name, srcSlot, toMove, ing.slot)
                 print(("    %s: barrel[%d] → crafter[%d] (moved %d/%d)"):format(
-                    ing.item:match(":(.+)") or ing.item,
+                    itemName:match(":(.+)") or itemName,
                     srcSlot, ing.slot, moved, toMove))
                 loaded = loaded + moved
             end
@@ -141,7 +165,7 @@ local function loadCrafter(recipe, qty)
         if loaded < needed then
             return false,
                 ("Not enough %s: need %d, placed %d"):format(
-                    ing.item, needed, loaded)
+                    itemName, needed, loaded)
         end
     end
     return true
@@ -155,7 +179,7 @@ local function waitForOutput(recipe, qty, timeout)
     while os.epoch("utc") < deadline do
         local have = 0
         for _, stack in pairs(outputBarrel.list()) do
-            if stack.name == recipe.output then
+            if stack.name == resolveItem(recipe.output) then
                 have = have + stack.count
             end
         end
@@ -191,8 +215,9 @@ local function executeCraft(recipe, qty)
     -- Helper: count how many of the recipe output are currently in the barrel.
     local function countOutput()
         local n = 0
+        local outputName = resolveItem(recipe.output)
         for _, stack in pairs(outputBarrel.list()) do
-            if stack.name == recipe.output then n = n + stack.count end
+            if stack.name == outputName then n = n + stack.count end
         end
         return n
     end
