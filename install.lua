@@ -24,6 +24,7 @@ local files = {
     "server.lua",
     "station.lua",
     "recipes.lua",
+    "processing.lua",
     "config_server.lua",
     "config_station.lua",
 }

@@ -24,8 +24,14 @@
 --         shell.run("server.lua")
 -- ============================================================
 
-local cfg     = dofile("config.lua")
+local cfg  = dofile("config.lua")
 local recipes = dofile("recipes.lua")
+-- Non-crafter processing recipes (press, mixer, etc.).
+-- Safe to load even if file is absent (returns empty table).
+local proc = (function()
+    if fs.exists("processing.lua") then return dofile("processing.lua") end
+    return {}
+end)()
 local PROTO   = cfg.protocol or "CRAFT_NET"
 
 -- Peripherals
@@ -170,13 +176,33 @@ local function requestItems(recipe, qty)
     end
 
     os.sleep(0.5)
-    packager.setAddress(cfg.station_address)
+    local addr = cfg.station_address
+    packager.setAddress(addr)
     local ok, err = pcall(packager.makePackage)
     if not ok then
         return false, "makePackage failed: " .. tostring(err)
     end
 
-    print(("[dispatch] Sent package to %s"):format(cfg.station_address))
+    print(("[dispatch] Sent package to %s"):format(addr))
+    return true
+end
+
+-- Send raw materials to a processing machine (press, mixer, etc.).
+-- The machine transforms them and routes output back to vault via Create
+-- logistics -- no CC station handshake or busy-tracking needed.
+local function dispatchProcess(rec, qty)
+    -- Temporarily redirect the packager to the processing station address
+    local savedAddr = cfg.station_address
+    cfg.station_address = rec.station
+    local ok, err = requestItems(rec, qty)
+    cfg.station_address = savedAddr
+    if not ok then
+        ui.status = "ERROR (process): " .. err
+        return false
+    end
+    local typeLabel = (rec.type or "process"):upper()
+    ui.status = ("[%s] Sent: %s x%d -> %s"):format(
+        typeLabel, rec.name, qty * (rec.output_count or 1), rec.station)
     return true
 end
 
@@ -270,19 +296,35 @@ end
 local function tryDispatchNext()
     local i = 1
     while i <= #queue do
-        local stName = findFreeStation()
-        if not stName then return end
         local job = queue[i]
-        if canCraft(job.rec, job.qty) then
-            -- Ingredients ready -- dispatch now
+        if not canCraft(job.rec, job.qty) then
+            -- Ingredients not ready yet; leave in queue
+            i = i + 1
+        elseif job.rec.type == "press"
+            or job.rec.type == "mix"
+            or job.rec.type == "fan_wash"
+            or job.rec.type == "fan_haunt"
+            or job.rec.type == "fan_cool"
+            or job.rec.type == "process" then
+            -- Processing job: no CC station needed, dispatch directly
             table.remove(queue, i)
             if ui.queueSel >= i then
                 ui.queueSel = math.max(0, ui.queueSel - 1)
             end
-            dispatchCraft(job.rec, job.qty)
+            dispatchProcess(job.rec, job.qty)
+            -- i unchanged; re-check same position (now holds next job)
         else
-            -- Ingredients not ready yet (waiting for sub-craft) -- skip for now
-            i = i + 1
+            -- Mechanical crafter job: needs a free CC station
+            local stName = findFreeStation()
+            if not stName then
+                i = i + 1  -- no station free; skip for now
+            else
+                table.remove(queue, i)
+                if ui.queueSel >= i then
+                    ui.queueSel = math.max(0, ui.queueSel - 1)
+                end
+                dispatchCraft(job.rec, job.qty)
+            end
         end
     end
 end
@@ -347,9 +389,12 @@ end
 
 -- Compound crafting helpers
 
--- Find the first recipe whose output matches itemName
+-- Find the first recipe (crafter or processing) that outputs itemName
 local function findRecipeFor(itemName)
     for _, r in ipairs(recipes) do
+        if r.output == itemName then return r end
+    end
+    for _, r in ipairs(proc) do
         if r.output == itemName then return r end
     end
     return nil
@@ -586,13 +631,14 @@ local function drawCraftTab(W, H)
                 iy = iy + 1
                 break
             end
-            local isTarget = (si == #cp.plan)
-            local making   = job.qty * math.max(1, job.rec.output_count or 1)
-            local have     = stockOf(job.rec.output)
+            local isTarget  = (si == #cp.plan)
+            local making    = job.qty * math.max(1, job.rec.output_count or 1)
+            local have      = stockOf(job.rec.output)
+            local typeLabel = job.rec.type and ("[%s] "):format((job.rec.type):upper()) or ""
             mfill(recX, iy, recW, " ", C.dim, C.bg)
             mw(recX, iy, trunc(
-               ("  %d. %s x%d  (have %d)"):format(
-                   si, job.rec.name, making, have),
+               ("  %d. %s%s x%d  (have %d)"):format(
+                   si, typeLabel, job.rec.name, making, have),
                recW), isTarget and colors.yellow or C.ok, C.bg)
             iy = iy + 1
         end
