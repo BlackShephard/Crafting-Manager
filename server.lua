@@ -414,8 +414,15 @@ local function buildCraftPlan(itemName, qty, plan, projected, depth)
     local rec = findRecipeFor(itemName)
     if not rec then return plan end
 
-    -- How much will we have: current vault stock + what earlier steps produce
-    local have = stockOf(itemName) + (projected[itemName] or 0)
+    -- For sub-ingredients (depth > 0): skip if vault already has enough.
+    -- For the root item (depth == 0): always plan to make the full qty --
+    -- the user explicitly asked to craft it, regardless of existing stock.
+    local have
+    if depth == 0 then
+        have = projected[itemName] or 0
+    else
+        have = stockOf(itemName) + (projected[itemName] or 0)
+    end
     local shortfall = qty - have
     if shortfall <= 0 then return plan end
 
