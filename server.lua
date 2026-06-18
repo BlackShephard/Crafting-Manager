@@ -134,9 +134,80 @@ local function scanVault()
     end)
 end
 
-local function stockOf(itemName)
+-- Tag-to-item resolution for unresolved recipe tags.
+-- Both `c:` (NeoForge common) and `o:` (ore-dict compat) prefixes are mapped.
+-- Add entries here whenever a recipe shows a tag name instead of an item ID.
+local TAG_MAP = {
+    -- Dusts
+    ["c:dusts/redstone"]         = "minecraft:redstone",
+    ["o:dusts/redstone"]         = "minecraft:redstone",
+    ["c:dusts/glowstone"]        = "minecraft:glowstone_dust",
+    ["o:dusts/glowstone"]        = "minecraft:glowstone_dust",
+    -- Rods / sticks
+    ["c:rods/wooden"]            = "minecraft:stick",
+    ["o:rods/wooden"]            = "minecraft:stick",
+    ["c:rods/blaze"]             = "minecraft:blaze_rod",
+    ["o:rods/blaze"]             = "minecraft:blaze_rod",
+    -- Ingots
+    ["c:ingots/iron"]            = "minecraft:iron_ingot",
+    ["o:ingots/iron"]            = "minecraft:iron_ingot",
+    ["c:ingots/gold"]            = "minecraft:gold_ingot",
+    ["o:ingots/gold"]            = "minecraft:gold_ingot",
+    ["c:ingots/copper"]          = "minecraft:copper_ingot",
+    ["o:ingots/copper"]          = "minecraft:copper_ingot",
+    ["c:ingots/zinc"]            = "create:zinc_ingot",
+    ["o:ingots/zinc"]            = "create:zinc_ingot",
+    ["c:ingots/brass"]           = "create:brass_ingot",
+    ["o:ingots/brass"]           = "create:brass_ingot",
+    -- Nuggets
+    ["c:nuggets/iron"]           = "minecraft:iron_nugget",
+    ["o:nuggets/iron"]           = "minecraft:iron_nugget",
+    ["c:nuggets/gold"]           = "minecraft:gold_nugget",
+    ["o:nuggets/gold"]           = "minecraft:gold_nugget",
+    -- Gems
+    ["c:gems/diamond"]           = "minecraft:diamond",
+    ["o:gems/diamond"]           = "minecraft:diamond",
+    ["c:gems/emerald"]           = "minecraft:emerald",
+    ["o:gems/emerald"]           = "minecraft:emerald",
+    ["c:gems/lapis"]             = "minecraft:lapis_lazuli",
+    ["o:gems/lapis"]             = "minecraft:lapis_lazuli",
+    ["c:gems/quartz"]            = "minecraft:quartz",
+    ["o:gems/quartz"]            = "minecraft:quartz",
+    -- Stones / blocks
+    ["c:stones"]                 = "minecraft:stone",
+    ["o:stones"]                 = "minecraft:stone",
+    ["c:cobblestones"]           = "minecraft:cobblestone",
+    ["o:cobblestones"]           = "minecraft:cobblestone",
+    ["c:cobblestones/normal"]    = "minecraft:cobblestone",
+    ["c:glass/colorless"]        = "minecraft:glass",
+    ["o:glass"]                  = "minecraft:glass",
+    ["c:glass_panes/colorless"]  = "minecraft:glass_pane",
+    ["o:paneGlass"]              = "minecraft:glass_pane",
+    -- Create-specific
+    ["c:andesite_alloys"]        = "create:andesite_alloy",
+    ["c:cogwheels"]              = "create:cogwheel",
+    ["c:large_cogwheels"]        = "create:large_cogwheel",
+    ["c:brass_sheets"]           = "create:brass_sheet",
+    ["c:copper_sheets"]          = "create:copper_sheet",
+    ["c:iron_sheets"]            = "create:iron_sheet",
+    ["c:zinc_sheets"]            = "create:zinc_sheet",
+    -- Dyes
+    ["c:dyes/red"]               = "minecraft:red_dye",
+    ["c:dyes/blue"]              = "minecraft:blue_dye",
+    ["c:dyes/green"]             = "minecraft:green_dye",
+    ["c:dyes/yellow"]            = "minecraft:yellow_dye",
+    ["c:dyes/black"]             = "minecraft:black_dye",
+    ["c:dyes/white"]             = "minecraft:white_dye",
+}
+
+-- Resolve a tag name or item ID to a concrete item ID.
+local function resolveItem(name)
+    return TAG_MAP[name] or name
+end
+
+    local resolved = resolveItem(itemName)
     for _, it in ipairs(invItems) do
-        if it.name == itemName then return it.count end
+        if it.name == resolved then return it.count end
     end
     return 0
 end
@@ -173,11 +244,12 @@ local function requestItems(recipe, qty)
     end
 
     for _, item in ipairs(order) do
-        local count = needed[item]
-        local moved = 0
+        local count    = needed[item]
+        local realItem = resolveItem(item)  -- resolve tag names to real IDs
+        local moved    = 0
         for slot, stack in pairs(vault.list()) do
             if moved >= count then break end
-            if stack.name == item then
+            if stack.name == realItem then
                 local n = vault.pushItems(
                     cfg.dispatch_barrel_name, slot,
                     math.min(count - moved, stack.count))
@@ -189,7 +261,7 @@ local function requestItems(recipe, qty)
                 dispatchBarrel.pushItems(cfg.vault_name, slot)
             end
             return false,
-                ("Not enough %s: need %d, have %d"):format(item, count, moved)
+                ("Not enough %s: need %d, have %d"):format(realItem, count, moved)
         end
     end
 
