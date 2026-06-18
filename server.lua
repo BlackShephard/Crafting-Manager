@@ -869,13 +869,14 @@ local function drawCraftTab(W, H)
         for i, ing in ipairs(rec.ingredients) do
             local y = ingY + i - 1
             if y > H - 3 then break end
-            local have = stockOf(ing.item)
+            local itemName = resolveItem(ing.item)
+            local have = stockOf(itemName)
             local need = ing.count * ui.qty
             local fg   = have >= need and C.ok or C.bad
             mfill(recX, y, recW, " ", fg, C.bg)
             mw(recX, y, trunc(
                ("  x%d %s  (have %d)"):format(
-                   need, ing.item:match(":(.+)") or ing.item, have),
+                   need, itemName:match(":(.+)") or itemName, have),
                recW), fg, C.bg)
         end
         -- CRAFT button row (H-2)
