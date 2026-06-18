@@ -205,6 +205,7 @@ local function resolveItem(name)
     return TAG_MAP[name] or name
 end
 
+local function stockOf(itemName)
     local resolved = resolveItem(itemName)
     for _, it in ipairs(invItems) do
         if it.name == resolved then return it.count end
