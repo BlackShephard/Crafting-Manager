@@ -202,9 +202,7 @@ local TAG_MAP = {
 
 -- Resolve a tag name or item ID to a concrete item ID.
 local function resolveItem(name)
-    if type(name) ~= "string" then return name end
-    local key = name:gsub("^TODO:", "")
-    return TAG_MAP[key] or key
+    return TAG_MAP[name] or name
 end
 
 local function stockOf(itemName)
@@ -1074,6 +1072,9 @@ local function handleCraftTouch(x, y, W, H)
     local recX  = invW + 2
     local recW  = W - recX + 1
     local listH = H - 5
+    local invListH = (ui.invDetail and ui.invSel >= 1
+                      and ui.invSel <= #invItems)
+                     and math.max(2, listH - 4) or listH
 
     -- Confirm overlay: only H-2 is interactive
     if ui.confirm then
