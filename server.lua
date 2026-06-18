@@ -1089,6 +1089,7 @@ local function handleCraftTouch(x, y, W, H)
                     queue[#queue + 1] = { rec = c.rec, qty = c.canMake }
                     ui.status = ("Queued (partial %d): %s [%d waiting]"):format(
                         c.canMake, c.rec.name, #queue)
+                    tryDispatchNext()
                 end
             elseif x >= W - 9 then
                 ui.confirm = nil
@@ -1245,6 +1246,7 @@ local function handleCraftTouch(x, y, W, H)
                         queue[#queue + 1] = { rec = rec, qty = ui.qty }
                         ui.status = ("Queued: %s x%d [%d waiting]"):format(
                             rec.name, ui.qty, #queue)
+                        tryDispatchNext()
                     end
                 else
                     -- Missing ingredients -- try to build a compound plan
@@ -1456,6 +1458,7 @@ while true do
     elseif ev[1] == "timer" and ev[2] == refreshTimer then
         scanVault()
         checkMinStock()
+        tryDispatchNext()
         drawUI()
         refreshTimer = os.startTimer(10)
     end
