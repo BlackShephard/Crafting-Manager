@@ -202,7 +202,9 @@ local TAG_MAP = {
 
 -- Resolve a tag name or item ID to a concrete item ID.
 local function resolveItem(name)
-    return TAG_MAP[name] or name
+    if type(name) ~= "string" then return name end
+    local key = name:gsub("^TODO:", "")
+    return TAG_MAP[key] or key
 end
 
 local function stockOf(itemName)
