@@ -1,5 +1,5 @@
 -- ============================================================
---  server.lua  —  Vault Inventory Manager & Crafting Dispatcher
+--  server.lua  --  Vault Inventory Manager & Crafting Dispatcher
 --
 --  PHYSICAL SETUP (this computer needs):
 --    . Wired modem  -> Create Item Vault
