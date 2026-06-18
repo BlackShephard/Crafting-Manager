@@ -302,6 +302,7 @@ local function tryDispatchNext()
             i = i + 1
         elseif job.rec.type == "press"
             or job.rec.type == "mix"
+            or job.rec.type == "deploy"
             or job.rec.type == "fan_wash"
             or job.rec.type == "fan_haunt"
             or job.rec.type == "fan_cool"
