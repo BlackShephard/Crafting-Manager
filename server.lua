@@ -227,6 +227,8 @@ local ui = {
     queueSel    = 0,
     -- Partial order confirm: nil or { rec, canMake, requested, missing }
     confirm     = nil,
+    -- Compound craft plan: nil or { rec, qty, plan=[{rec,qty},...] }
+    compoundPlan = nil,
 }
 
 -- Dispatch (defined before touch handlers need it)
@@ -266,15 +268,22 @@ local function dispatchCraft(rec, qty)
 end
 
 local function tryDispatchNext()
-    while #queue > 0 do
+    local i = 1
+    while i <= #queue do
         local stName = findFreeStation()
         if not stName then return end
-        local job = table.remove(queue, 1)
-        -- Keep queueSel in bounds after removal
-        if ui.queueSel > 0 then
-            ui.queueSel = math.max(0, ui.queueSel - 1)
+        local job = queue[i]
+        if canCraft(job.rec, job.qty) then
+            -- Ingredients ready -- dispatch now
+            table.remove(queue, i)
+            if ui.queueSel >= i then
+                ui.queueSel = math.max(0, ui.queueSel - 1)
+            end
+            dispatchCraft(job.rec, job.qty)
+        else
+            -- Ingredients not ready yet (waiting for sub-craft) -- skip for now
+            i = i + 1
         end
-        dispatchCraft(job.rec, job.qty)
     end
 end
 
@@ -334,6 +343,53 @@ local function getMissing(rec, qty)
     end
     table.sort(out, function(a, b) return a.short > b.short end)
     return out
+end
+
+-- Compound crafting helpers
+
+-- Find the first recipe whose output matches itemName
+local function findRecipeFor(itemName)
+    for _, r in ipairs(recipes) do
+        if r.output == itemName then return r end
+    end
+    return nil
+end
+
+-- Build an ordered list of {rec, qty} jobs needed to produce qty of itemName.
+-- Jobs are in execution order: leaf dependencies first, final recipe last.
+-- projected tracks items that earlier plan steps will produce, so we don't
+-- over-plan the same ingredient twice.
+local function buildCraftPlan(itemName, qty, plan, projected, depth)
+    plan      = plan      or {}
+    projected = projected or {}
+    depth     = depth     or 0
+    if depth > 10 then return plan end  -- cycle guard
+
+    local rec = findRecipeFor(itemName)
+    if not rec then return plan end
+
+    -- How much will we have: current vault stock + what earlier steps produce
+    local have = stockOf(itemName) + (projected[itemName] or 0)
+    local shortfall = qty - have
+    if shortfall <= 0 then return plan end
+
+    local crafts = math.ceil(shortfall / math.max(1, rec.output_count or 1))
+
+    -- Register projected output before recursing (prevents over-planning)
+    projected[itemName] = (projected[itemName] or 0)
+                          + crafts * math.max(1, rec.output_count or 1)
+
+    -- Recurse into each ingredient (dependencies before self)
+    local needed = {}
+    for _, ing in ipairs(rec.ingredients) do
+        needed[ing.item] = (needed[ing.item] or 0) + ing.count * crafts
+    end
+    for item, n in pairs(needed) do
+        buildCraftPlan(item, n, plan, projected, depth + 1)
+    end
+
+    plan[#plan + 1] = { rec = rec, qty = crafts }
+    return plan
 end
 
 -- Drawing helpers
@@ -507,6 +563,48 @@ local function drawCraftTab(W, H)
             mw(recX, btnY, lbl, C.btnTx, C.ok)
         end
         mw(W - 9, btnY, " CANCEL ", C.btnTx, C.bad)
+        return
+    end
+
+    -- COMPOUND CRAFT PLAN OVERLAY
+    if ui.compoundPlan then
+        local cp = ui.compoundPlan
+        mfill(recX, 4, recW, " ", colors.cyan, C.bg)
+        mw(recX, 4, trunc("  COMPOUND CRAFT PLAN", recW), colors.cyan, C.bg)
+        mfill(recX, 5, recW, " ", C.dim, C.bg)
+        mw(recX, 5, trunc(("  Target: %s x%d"):format(cp.rec.name, cp.qty), recW),
+           colors.white, C.bg)
+        mfill(recX, 6, recW, " ", C.dim, C.bg)
+        mw(recX, 6, trunc(("  %d craft step(s):"):format(#cp.plan), recW), C.dim, C.bg)
+        local iy = 7
+        for si, job in ipairs(cp.plan) do
+            if iy > H - 3 then
+                mfill(recX, iy, recW, " ", C.dim, C.bg)
+                mw(recX, iy, trunc(
+                   ("  ...and %d more step(s)"):format(#cp.plan - si + 1),
+                   recW), C.dim, C.bg)
+                iy = iy + 1
+                break
+            end
+            local isTarget = (si == #cp.plan)
+            local making   = job.qty * math.max(1, job.rec.output_count or 1)
+            local have     = stockOf(job.rec.output)
+            mfill(recX, iy, recW, " ", C.dim, C.bg)
+            mw(recX, iy, trunc(
+               ("  %d. %s x%d  (have %d)"):format(
+                   si, job.rec.name, making, have),
+               recW), isTarget and colors.yellow or C.ok, C.bg)
+            iy = iy + 1
+        end
+        while iy <= H - 3 do
+            mfill(recX, iy, recW, " ", C.dim, C.bg)
+            iy = iy + 1
+        end
+        -- Buttons (row H-2)
+        local btnY = H - 2
+        mfill(recX, btnY, recW, " ", C.dim, C.bg)
+        mw(recX,  btnY, " QUEUE ALL ", C.btnTx, C.ok)
+        mw(W - 9, btnY, " CANCEL ",   C.btnTx, C.bad)
         return
     end
 
@@ -719,7 +817,9 @@ local function drawUI()
     -- Footer hint (H)
     mfill(1, H, W, " ", C.hdrTx, C.hdr)
     local hint
-    if ui.confirm then
+    if ui.compoundPlan then
+        hint = "Tap [QUEUE ALL] to queue all steps  |  Tap [CANCEL] to abort"
+    elseif ui.confirm then
         hint = "Tap [CRAFT N] for partial order  |  Tap [CANCEL] to abort"
     elseif ui.tab == "craft" then
         if ui.searchMode then
@@ -748,7 +848,6 @@ local function handleCraftTouch(x, y, W, H)
         if y == H - 2 then
             local c = ui.confirm
             if c.canMake > 0 and x < W - 9 then
-                -- Craft the partial amount
                 ui.confirm = nil
                 local _, freeN = countStations()
                 if freeN > 0 then
@@ -761,6 +860,27 @@ local function handleCraftTouch(x, y, W, H)
             elseif x >= W - 9 then
                 ui.confirm = nil
                 ui.status  = "Order cancelled."
+            end
+        end
+        return
+    end
+
+    -- Compound plan overlay: only H-2 is interactive
+    if ui.compoundPlan then
+        if y == H - 2 then
+            local cp = ui.compoundPlan
+            if x <= recX + 10 then
+                -- [QUEUE ALL] -- add all steps in order
+                ui.compoundPlan = nil
+                for _, job in ipairs(cp.plan) do
+                    queue[#queue + 1] = { rec = job.rec, qty = job.qty }
+                end
+                ui.status = ("Queued %d steps for %s x%d"):format(
+                    #cp.plan, cp.rec.name, cp.qty)
+                tryDispatchNext()
+            elseif x >= W - 9 then
+                ui.compoundPlan = nil
+                ui.status = "Compound plan cancelled."
             end
         end
         return
@@ -829,10 +949,10 @@ local function handleCraftTouch(x, y, W, H)
                 ui.qty = ui.qty + 1
                 ui.status = "Quantity: " .. ui.qty
             elseif rec then
-                -- CRAFT button: check resources
+                -- CRAFT button: full order, compound, partial, or impossible
                 local canMake = maxCraftable(rec)
                 if canMake >= ui.qty then
-                    -- Full order possible
+                    -- Full order: have everything right now
                     local _, freeN = countStations()
                     if freeN > 0 then
                         dispatchCraft(rec, ui.qty)
@@ -841,23 +961,33 @@ local function handleCraftTouch(x, y, W, H)
                         ui.status = ("Queued: %s x%d [%d waiting]"):format(
                             rec.name, ui.qty, #queue)
                     end
-                elseif canMake == 0 then
-                    -- Cannot make any at all
-                    local miss = getMissing(rec, ui.qty)
-                    ui.confirm = {
-                        rec = rec, canMake = 0,
-                        requested = ui.qty, missing = miss,
-                    }
-                    ui.status = "Insufficient resources -- see details"
                 else
-                    -- Partial: show confirmation panel
-                    local miss = getMissing(rec, ui.qty)
-                    ui.confirm = {
-                        rec = rec, canMake = canMake,
-                        requested = ui.qty, missing = miss,
-                    }
-                    ui.status = ("Partial: can make %d of %d %s"):format(
-                        canMake, ui.qty, rec.name)
+                    -- Missing ingredients -- try to build a compound plan
+                    local plan = buildCraftPlan(rec.output, ui.qty)
+                    if #plan > 1 then
+                        -- Has sub-recipes: show compound plan panel
+                        ui.compoundPlan = { rec = rec, qty = ui.qty, plan = plan }
+                        ui.confirm      = nil
+                        ui.status = ("Compound plan: %d steps for %s x%d"):format(
+                            #plan, rec.name, ui.qty)
+                    elseif canMake > 0 then
+                        -- No sub-recipes, partial order possible
+                        local miss = getMissing(rec, ui.qty)
+                        ui.confirm = {
+                            rec = rec, canMake = canMake,
+                            requested = ui.qty, missing = miss,
+                        }
+                        ui.status = ("Partial: can make %d of %d %s"):format(
+                            canMake, ui.qty, rec.name)
+                    else
+                        -- Can't make any and no sub-recipes
+                        local miss = getMissing(rec, ui.qty)
+                        ui.confirm = {
+                            rec = rec, canMake = 0,
+                            requested = ui.qty, missing = miss,
+                        }
+                        ui.status = "Insufficient resources -- see details"
+                    end
                 end
             end
             return
@@ -876,7 +1006,8 @@ local function handleCraftTouch(x, y, W, H)
                         ui.recSel     = idx
                         ui.showDetail = true
                     end
-                    ui.confirm = nil
+                    ui.confirm      = nil
+                    ui.compoundPlan = nil
                     local r = filteredRec[ui.recSel]
                     ui.status = r.name
                         .. (ui.showDetail and " -- tap CRAFT to queue" or "")
@@ -926,14 +1057,16 @@ local function handleTouch(x, y)
     -- Tab bar (row 2)
     if y == 2 then
         if x >= 2 and x <= 8 then
-            ui.tab     = "craft"
-            ui.confirm = nil
-            ui.status  = "Craft & Recipes"
+            ui.tab          = "craft"
+            ui.confirm      = nil
+            ui.compoundPlan = nil
+            ui.status       = "Craft & Recipes"
         elseif x >= 10 and x <= 16 then
-            ui.tab      = "queue"
-            ui.confirm  = nil
-            ui.queueSel = 0
-            ui.status   = "Queue & Station Status"
+            ui.tab          = "queue"
+            ui.confirm      = nil
+            ui.compoundPlan = nil
+            ui.queueSel     = 0
+            ui.status       = "Queue & Station Status"
         end
         return
     end
