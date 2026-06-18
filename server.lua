@@ -32,6 +32,24 @@ local proc = (function()
     if fs.exists("processing.lua") then return dofile("processing.lua") end
     return {}
 end)()
+
+-- Min-stock targets: load from minstock.lua, persists across reboots
+local minStock = {}
+if fs.exists("minstock.lua") then
+    local ok, t = pcall(dofile, "minstock.lua")
+    if ok and type(t) == "table" then minStock = t end
+end
+
+local function saveMinStock()
+    local f = io.open("minstock.lua", "w")
+    if not f then return end
+    f:write("return {\n")
+    for item, n in pairs(minStock) do
+        f:write(('  ["%s"] = %d,\n'):format(item, n))
+    end
+    f:write("}\n")
+    f:close()
+end
 local PROTO   = cfg.protocol or "CRAFT_NET"
 
 -- Peripherals
@@ -255,6 +273,9 @@ local ui = {
     confirm     = nil,
     -- Compound craft plan: nil or { rec, qty, plan=[{rec,qty},...] }
     compoundPlan = nil,
+    -- Min-stock editor
+    invDetail   = false,   -- true when editor is open for selected inv item
+    minQty      = 0,       -- qty being configured in the editor
 }
 
 -- Dispatch (defined before touch handlers need it)
@@ -328,6 +349,38 @@ local function tryDispatchNext()
             end
         end
     end
+end
+
+-- Auto-replenish: queue compound plans for items below their min-stock target.
+-- Skips items already being handled (in queue or pending).
+local function checkMinStock()
+    local anyQueued = false
+    for item, minN in pairs(minStock) do
+        if stockOf(item) < minN then
+            local busy = false
+            for _, job in ipairs(queue) do
+                if job.rec.output == item then busy = true; break end
+            end
+            if not busy then
+                for _, p in pairs(pending) do
+                    if p.recipe.output == item then busy = true; break end
+                end
+            end
+            if not busy then
+                local needed = minN - stockOf(item)
+                local plan = buildCraftPlan(item, needed)
+                if #plan > 0 then
+                    for _, job in ipairs(plan) do
+                        queue[#queue + 1] = { rec = job.rec, qty = job.qty }
+                    end
+                    anyQueued = true
+                    ui.status = ("Restocking: %s (+%d needed)"):format(
+                        item:match(":(.+)") or item, needed)
+                end
+            end
+        end
+    end
+    if anyQueued then tryDispatchNext() end
 end
 
 -- Recipe filtering
@@ -523,6 +576,12 @@ local function drawCraftTab(W, H)
     local recW  = W - recX + 1
     local listH = H - 5   -- rows 4..(H-2)
 
+    -- When the min-stock editor is open, shrink the visible list by 4 rows
+    -- so the editor occupies the bottom of the inventory column.
+    local invListH = (ui.invDetail and ui.invSel >= 1
+                      and ui.invSel <= #invItems)
+                     and math.max(2, listH - 4) or listH
+
     -- Sub-headers (row 3)
     -- Inventory: label + [^][v] scroll arrows at far right
     mfill(1, 3, invW, " ", C.subTx, C.sub)
@@ -547,23 +606,63 @@ local function drawCraftTab(W, H)
     mw(W - 6, 3, "[^]", C.btnTx, colors.gray)
     mw(W - 3, 3, "[v]", C.btnTx, colors.gray)
 
-    -- Inventory list (rows 4..H-2)
+    -- Inventory list (rows 4..H-2, shorter when min-stock editor is open)
     for row = 1, listH do
         local idx = row + ui.invScroll
         local y   = row + 3
         mfill(1, y, invW, " ", C.dim, C.bg)
-        if idx <= #invItems then
-            local it  = invItems[idx]
-            local sel = (idx == ui.invSel)
-            local fg  = sel and C.selTx or C.dim
-            local bg  = sel and C.sel   or C.bg
+        mw(divX, y, "|", C.sub, C.bg)
+        if row <= invListH and idx <= #invItems then
+            local it    = invItems[idx]
+            local sel   = (idx == ui.invSel)
+            local minN  = minStock[it.name]
+            local below = minN and (it.count < minN)
+            local fg    = sel and C.selTx
+                          or (below and C.warn or C.dim)
+            local bg    = sel and C.sel or C.bg
             mfill(1, y, invW, " ", fg, bg)
-            local cnt  = "x" .. it.count
+            local cnt  = "x" .. it.count .. (minN and ("/" .. minN) or "")
             local namW = invW - #cnt - 1
             mw(1,               y, trunc(it.displayName, namW), fg, bg)
-            mw(invW - #cnt + 1, y, cnt, sel and colors.yellow or C.ok, bg)
+            mw(invW - #cnt + 1, y, cnt,
+               sel and colors.yellow or (below and C.warn or C.ok), bg)
         end
-        mw(divX, y, "|", C.sub, C.bg)
+    end
+
+    -- Min-stock editor panel (bottom 4 rows of inventory column)
+    if ui.invDetail and ui.invSel >= 1 and ui.invSel <= #invItems then
+        local it  = invItems[ui.invSel]
+        local ey1 = invListH + 4   -- first editor y  (= row invListH+1 → y=row+3)
+        local ey2 = ey1 + 1
+        local ey3 = ey1 + 2
+        local ey4 = ey1 + 3
+
+        -- Header
+        mfill(1, ey1, invW, " ", C.sub, C.sub)
+        mw(2, ey1, trunc("MIN: " .. it.displayName, invW - 1), C.subTx, C.sub)
+
+        -- Current stock info
+        local minN = minStock[it.name] or 0
+        mfill(1, ey2, invW, " ", C.dim, C.bg)
+        mw(2, ey2, ("Have:%d  Min:%d"):format(it.count, minN), C.dim, C.bg)
+
+        -- Step buttons:  [-8] [-1]  qty  [+1] [+8]
+        mfill(1, ey3, invW, " ", C.dim, C.bg)
+        mw(1,        ey3, "[-8]", C.btnTx, C.bad)
+        mw(6,        ey3, "[-1]", C.btnTx, C.bad)
+        local qStr = tostring(ui.minQty)
+        mw(math.max(11, math.floor((invW - #qStr) / 2) + 1),
+           ey3, qStr, colors.white, C.bg)
+        mw(invW - 8, ey3, "[+1]", C.btnTx, C.ok)
+        mw(invW - 3, ey3, "[+8]", C.btnTx, C.ok)
+
+        -- SET / CLR buttons
+        local half = math.floor(invW / 2)
+        mfill(1, ey4, invW, " ", C.dim, C.bg)
+        mfill(1,      ey4, half,       " ", C.btnTx, C.ok)
+        mw(2,         ey4, "SET",           C.btnTx, C.ok)
+        mfill(half+1, ey4, invW - half, " ", C.btnTx, C.bad)
+        mw(half + 2,  ey4, "CLR",           C.btnTx, C.bad)
     end
 
     -- Recipe panel
@@ -979,11 +1078,63 @@ local function handleCraftTouch(x, y, W, H)
 
     -- Inventory list (rows 4..H-2)
     if x >= 1 and x <= invW and y >= 4 and y <= 3 + listH then
+        -- Min-stock editor button taps (bottom 4 rows when editor is open)
+        if ui.invDetail and ui.invSel >= 1 and ui.invSel <= #invItems then
+            local ey1 = invListH + 4
+            if y == ey1 + 2 then
+                -- Step buttons row
+                if     x <= 4        then ui.minQty = math.max(0, ui.minQty - 8)
+                elseif x <= 9        then ui.minQty = math.max(0, ui.minQty - 1)
+                elseif x >= invW - 3 then ui.minQty = ui.minQty + 8
+                elseif x >= invW - 8 then ui.minQty = ui.minQty + 1
+                end
+                return
+            elseif y == ey1 + 3 then
+                -- SET / CLR row
+                local it = invItems[ui.invSel]
+                if x <= math.floor(invW / 2) then
+                    -- SET
+                    if ui.minQty > 0 then
+                        minStock[it.name] = ui.minQty
+                    else
+                        minStock[it.name] = nil
+                    end
+                    saveMinStock()
+                    ui.invDetail = false
+                    ui.status = ("Min stock for %s set to %d"):format(
+                        it.displayName, ui.minQty)
+                else
+                    -- CLR
+                    minStock[it.name] = nil
+                    saveMinStock()
+                    ui.invDetail = false
+                    ui.status = "Min stock cleared for " .. it.displayName
+                end
+                return
+            elseif y >= ey1 then
+                return  -- tap in editor header/info rows: ignore
+            end
+        end
+
+        -- Normal inventory list tap
         local idx = (y - 3) + ui.invScroll
         if idx >= 1 and idx <= #invItems then
-            ui.invSel    = idx
-            ui.showDetail = false
-            ui.status    = invItems[idx].displayName .. "  x" .. invItems[idx].count
+            if idx == ui.invSel and not ui.invDetail then
+                -- Second tap on same item: open min-stock editor
+                ui.invDetail = true
+                ui.minQty    = minStock[invItems[idx].name] or 0
+                ui.status    = "Set min stock for " .. invItems[idx].displayName
+            else
+                -- New item: select it, close any open editor
+                ui.invSel    = idx
+                ui.invDetail = false
+                ui.showDetail = false
+                ui.status    = invItems[idx].displayName
+                               .. "  x" .. invItems[idx].count
+                               .. (minStock[invItems[idx].name]
+                                  and ("  (min:" .. minStock[invItems[idx].name] .. ")")
+                                  or "")
+            end
         end
         return
     end
@@ -1114,11 +1265,13 @@ local function handleTouch(x, y)
             ui.tab          = "craft"
             ui.confirm      = nil
             ui.compoundPlan = nil
+            ui.invDetail    = false
             ui.status       = "Craft & Recipes"
         elseif x >= 10 and x <= 16 then
             ui.tab          = "queue"
             ui.confirm      = nil
             ui.compoundPlan = nil
+            ui.invDetail    = false
             ui.queueSel     = 0
             ui.status       = "Queue & Station Status"
         end
@@ -1159,6 +1312,7 @@ local function handleMsg(sid, msg)
             ui.status = ("Done: %s x%d via %s -- vault updated%s"):format(
                 job.recipe.name, job.qty, job.stationName, qStr)
             tryDispatchNext()
+            checkMinStock()
         end
 
     elseif msg.type == "DENY" then
@@ -1221,6 +1375,7 @@ while true do
 
     elseif ev[1] == "timer" and ev[2] == refreshTimer then
         scanVault()
+        checkMinStock()
         drawUI()
         refreshTimer = os.startTimer(10)
     end
