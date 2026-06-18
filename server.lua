@@ -207,10 +207,16 @@ local function resolveItem(name)
     return TAG_MAP[key] or key
 end
 
+local function itemKey(name)
+    local resolved = resolveItem(name)
+    if type(resolved) ~= "string" then return resolved end
+    return resolved:gsub("^minecraft:", "")
+end
+
 local function stockOf(itemName)
-    local resolved = resolveItem(itemName)
+    local resolved = itemKey(itemName)
     for _, it in ipairs(invItems) do
-        if it.name == resolved then return it.count end
+        if itemKey(it.name) == resolved then return it.count end
     end
     return 0
 end
@@ -220,7 +226,7 @@ local function canCraft(rec, qty)
     qty = qty or 1
     local needed = {}
     for _, ing in ipairs(rec.ingredients) do
-        local item = resolveItem(ing.item)
+        local item = itemKey(ing.item)
         needed[item] = (needed[item] or 0) + ing.count * qty
     end
     for item, n in pairs(needed) do
@@ -235,11 +241,12 @@ local function requestItems(recipe, qty)
     local needed = {}
     local order  = {}
     for _, ing in ipairs(recipe.ingredients) do
-        if needed[ing.item] then
-            needed[ing.item] = needed[ing.item] + ing.count * qty
+        local item = itemKey(ing.item)
+        if needed[item] then
+            needed[item] = needed[item] + ing.count * qty
         else
-            needed[ing.item] = ing.count * qty
-            order[#order + 1] = ing.item
+            needed[item] = ing.count * qty
+            order[#order + 1] = item
         end
     end
 
@@ -253,7 +260,7 @@ local function requestItems(recipe, qty)
         local moved    = 0
         for slot, stack in pairs(vault.list()) do
             if moved >= count then break end
-            if stack.name == realItem then
+            if itemKey(stack.name) == itemKey(realItem) then
                 local n = vault.pushItems(
                     cfg.dispatch_barrel_name, slot,
                     math.min(count - moved, stack.count))
@@ -435,11 +442,11 @@ local function checkMinStock()
         if stockOf(item) < minN then
             local busy = false
             for _, job in ipairs(queue) do
-                if job.rec.output == item then busy = true; break end
+                if itemKey(job.rec.output) == itemKey(item) then busy = true; break end
             end
             if not busy then
                 for _, p in pairs(pending) do
-                    if p.recipe.output == item then busy = true; break end
+                    if itemKey(p.recipe.output) == itemKey(item) then busy = true; break end
                 end
             end
             if not busy then
@@ -484,7 +491,7 @@ end
 local function maxCraftable(rec)
     local needed = {}
     for _, ing in ipairs(rec.ingredients) do
-        local item = resolveItem(ing.item)
+        local item = itemKey(ing.item)
         needed[item] = (needed[item] or 0) + ing.count
     end
     if not next(needed) then return math.huge end
@@ -500,7 +507,7 @@ end
 local function getMissing(rec, qty)
     local needed = {}
     for _, ing in ipairs(rec.ingredients) do
-        local item = resolveItem(ing.item)
+        local item = itemKey(ing.item)
         needed[item] = (needed[item] or 0) + ing.count * qty
     end
     local out = {}
@@ -523,11 +530,12 @@ end
 
 -- Find the first recipe (crafter or processing) that outputs itemName
 local function findRecipeFor(itemName)
+    local key = itemKey(itemName)
     for _, r in ipairs(recipes) do
-        if r.output == itemName then return r end
+        if itemKey(r.output) == key then return r end
     end
     for _, r in ipairs(proc) do
-        if r.output == itemName then return r end
+        if itemKey(r.output) == key then return r end
     end
     return nil
 end
@@ -566,7 +574,7 @@ local function buildCraftPlan(itemName, qty, plan, projected, depth)
     -- Recurse into each ingredient (dependencies before self)
     local needed = {}
     for _, ing in ipairs(rec.ingredients) do
-        local item = resolveItem(ing.item)
+        local item = itemKey(ing.item)
         needed[item] = (needed[item] or 0) + ing.count * crafts
     end
     for item, n in pairs(needed) do
