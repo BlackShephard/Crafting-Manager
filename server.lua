@@ -218,7 +218,8 @@ local function canCraft(rec, qty)
     qty = qty or 1
     local needed = {}
     for _, ing in ipairs(rec.ingredients) do
-        needed[ing.item] = (needed[ing.item] or 0) + ing.count * qty
+        local item = resolveItem(ing.item)
+        needed[item] = (needed[item] or 0) + ing.count * qty
     end
     for item, n in pairs(needed) do
         if stockOf(item) < n then return false end
@@ -481,7 +482,8 @@ end
 local function maxCraftable(rec)
     local needed = {}
     for _, ing in ipairs(rec.ingredients) do
-        needed[ing.item] = (needed[ing.item] or 0) + ing.count
+        local item = resolveItem(ing.item)
+        needed[item] = (needed[item] or 0) + ing.count
     end
     if not next(needed) then return math.huge end
     local best = math.huge
@@ -496,7 +498,8 @@ end
 local function getMissing(rec, qty)
     local needed = {}
     for _, ing in ipairs(rec.ingredients) do
-        needed[ing.item] = (needed[ing.item] or 0) + ing.count * qty
+        local item = resolveItem(ing.item)
+        needed[item] = (needed[item] or 0) + ing.count * qty
     end
     local out = {}
     for item, need in pairs(needed) do
@@ -561,7 +564,8 @@ local function buildCraftPlan(itemName, qty, plan, projected, depth)
     -- Recurse into each ingredient (dependencies before self)
     local needed = {}
     for _, ing in ipairs(rec.ingredients) do
-        needed[ing.item] = (needed[ing.item] or 0) + ing.count * crafts
+        local item = resolveItem(ing.item)
+        needed[item] = (needed[item] or 0) + ing.count * crafts
     end
     for item, n in pairs(needed) do
         buildCraftPlan(item, n, plan, projected, depth + 1)
