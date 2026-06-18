@@ -1,4 +1,4 @@
-﻿-- ============================================================
+-- ============================================================
 --  server.lua  —  Vault Inventory Manager & Crafting Dispatcher
 --
 --  PHYSICAL SETUP (this computer needs):
