@@ -98,12 +98,30 @@ local TAG_MAP = {
     ["c:andesite_alloys"]       = "create:andesite_alloy",
     ["c:cogwheels"]             = "create:cogwheel",
     ["c:large_cogwheels"]       = "create:large_cogwheel",
+    ["c:strings"]               = "minecraft:string",
+    ["c:slimeballs"]            = "minecraft:slime_ball",
+    ["c:ender_pearls"]          = "minecraft:ender_pearl",
+    ["c:crops/wheat"]           = "minecraft:wheat",
+    ["c:crop/wheat"]            = "minecraft:wheat",
+    ["c:crops/potato"]          = "minecraft:potato",
+    ["c:dyes/pink"]             = "minecraft:pink_dye",
 }
 
 local function resolveItem(name)
     if type(name) ~= "string" then return name end
     local key = name:gsub("^TODO:", "")
     return TAG_MAP[key] or key
+end
+
+local function isGenericPlanksTag(name)
+    if type(name) ~= "string" then return false end
+    local key = name:gsub("^TODO:", "")
+    return key == "c:planks" or key == "o:planks"
+end
+
+local function isPlankItem(name)
+    local key = resolveItem(name)
+    return type(key) == "string" and key:sub(-7) == "_planks"
 end
 
 -- ── Crafting logic ──────────────────────────────────────────
@@ -119,18 +137,28 @@ local function waitForItems(recipe, qty, timeout)
     -- Build total-needed map (merge duplicate items across slots).
     local needed = {}
     for _, ing in ipairs(recipe.ingredients) do
-        local item = resolveItem(ing.item)
+        local item = isGenericPlanksTag(ing.item) and "<any_planks>" or resolveItem(ing.item)
         needed[item] = (needed[item] or 0) + ing.count * qty
     end
 
     while os.epoch("utc") < deadline do
         local have = {}
         for _, stack in pairs(inputChest.list()) do
-            have[stack.name] = (have[stack.name] or 0) + stack.count
+            local item = resolveItem(stack.name)
+            have[item] = (have[item] or 0) + stack.count
         end
         local ready = true
         for item, n in pairs(needed) do
-            if (have[item] or 0) < n then
+            local count = item == "<any_planks>" and 0 or (have[item] or 0)
+            if item == "<any_planks>" then
+                count = 0
+                for name, stackCount in pairs(have) do
+                    if type(name) == "string" and name:sub(-7) == "_planks" then
+                        count = count + stackCount
+                    end
+                end
+            end
+            if count < n then
                 ready = false
                 break
             end
@@ -147,17 +175,23 @@ end
 local function loadCrafter(recipe, qty)
     local crafterName = cfg.crafter_name
     for _, ing in ipairs(recipe.ingredients) do
-        local itemName = resolveItem(ing.item)
+        local itemName = isGenericPlanksTag(ing.item) and nil or resolveItem(ing.item)
         local needed = ing.count * qty
         local loaded = 0
         for srcSlot, stack in pairs(inputChest.list()) do
             if loaded >= needed then break end
-            if stack.name == itemName then
+            local matches = false
+            if isGenericPlanksTag(ing.item) then
+                matches = isPlankItem(stack.name)
+            else
+                matches = stack.name == itemName
+            end
+            if matches then
                 local toMove = math.min(needed - loaded, stack.count)
                 local moved  = inputChest.pushItems(
                                    cfg.crafter_name, srcSlot, toMove, ing.slot)
                 print(("    %s: barrel[%d] → crafter[%d] (moved %d/%d)"):format(
-                    itemName:match(":(.+)") or itemName,
+                    (itemName or "planks"):match("(.+)") or (itemName or "planks"),
                     srcSlot, ing.slot, moved, toMove))
                 loaded = loaded + moved
             end
@@ -165,7 +199,7 @@ local function loadCrafter(recipe, qty)
         if loaded < needed then
             return false,
                 ("Not enough %s: need %d, placed %d"):format(
-                    itemName, needed, loaded)
+                    itemName or "planks", needed, loaded)
         end
     end
     return true

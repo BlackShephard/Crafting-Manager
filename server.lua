@@ -198,22 +198,52 @@ local TAG_MAP = {
     ["c:dyes/yellow"]            = "minecraft:yellow_dye",
     ["c:dyes/black"]             = "minecraft:black_dye",
     ["c:dyes/white"]             = "minecraft:white_dye",
+    ["c:dyes/purple"]            = "minecraft:purple_dye",
+    ["c:dyes/orange"]            = "minecraft:orange_dye",
+    ["c:dyes/pink"]              = "minecraft:pink_dye",
+    ["c:ender_pearls"]          = "minecraft:ender_pearl",
+    ["c:slimeballs"]            = "minecraft:slime_ball",
+    ["c:strings"]               = "minecraft:string",
+    ["c:crops/wheat"]           = "minecraft:wheat",
+    ["c:crop/wheat"]            = "minecraft:wheat",
+    ["c:crops/potato"]          = "minecraft:potato",
+    ["c:dyes/pink"]             = "minecraft:pink_dye",
 }
 
 -- Resolve a tag name or item ID to a concrete item ID.
 local function resolveItem(name)
     if type(name) ~= "string" then return name end
     local key = name:gsub("^TODO:", "")
-    return TAG_MAP[key] or key
+    return TAG_MAP[key] or key:match("^([^:]+:[^:]+)$") or key
 end
 
 local function itemKey(name)
     local resolved = resolveItem(name)
     if type(resolved) ~= "string" then return resolved end
-    return resolved:gsub("^minecraft:", "")
+    return resolved:gsub("^minecraft:", ""):gsub("^create:", "")
+end
+
+local function isGenericPlanksTag(name)
+    if type(name) ~= "string" then return false end
+    local key = name:gsub("^TODO:", "")
+    return key == "c:planks" or key == "o:planks"
+end
+
+local function isPlankItem(name)
+    local key = itemKey(name)
+    return type(key) == "string" and key:sub(-7) == "_planks"
 end
 
 local function stockOf(itemName)
+    if isGenericPlanksTag(itemName) then
+        local total = 0
+        for _, it in ipairs(invItems) do
+            if isPlankItem(it.name) then
+                total = total + it.count
+            end
+        end
+        return total
+    end
     local resolved = itemKey(itemName)
     for _, it in ipairs(invItems) do
         if itemKey(it.name) == resolved then return it.count end
@@ -226,11 +256,12 @@ local function canCraft(rec, qty)
     qty = qty or 1
     local needed = {}
     for _, ing in ipairs(rec.ingredients) do
-        local item = itemKey(ing.item)
+        local item = isGenericPlanksTag(ing.item) and "<any_planks>" or itemKey(ing.item)
         needed[item] = (needed[item] or 0) + ing.count * qty
     end
     for item, n in pairs(needed) do
-        if stockOf(item) < n then return false end
+        local have = item == "<any_planks>" and stockOf("c:planks") or stockOf(item)
+        if have < n then return false end
     end
     return true
 end
@@ -241,7 +272,7 @@ local function requestItems(recipe, qty)
     local needed = {}
     local order  = {}
     for _, ing in ipairs(recipe.ingredients) do
-        local item = itemKey(ing.item)
+        local item = isGenericPlanksTag(ing.item) and "<any_planks>" or itemKey(ing.item)
         if needed[item] then
             needed[item] = needed[item] + ing.count * qty
         else
@@ -256,11 +287,18 @@ local function requestItems(recipe, qty)
 
     for _, item in ipairs(order) do
         local count    = needed[item]
-        local realItem = resolveItem(item)  -- resolve tag names to real IDs
+        local realItem = item == "<any_planks>" and nil or resolveItem(item)
         local moved    = 0
         for slot, stack in pairs(vault.list()) do
             if moved >= count then break end
-            if itemKey(stack.name) == itemKey(realItem) then
+            local stackKey = itemKey(stack.name)
+            local matches = false
+            if item == "<any_planks>" then
+                matches = isPlankItem(stack.name)
+            else
+                matches = stackKey == itemKey(realItem)
+            end
+            if matches then
                 local n = vault.pushItems(
                     cfg.dispatch_barrel_name, slot,
                     math.min(count - moved, stack.count))
@@ -271,8 +309,9 @@ local function requestItems(recipe, qty)
             for slot in pairs(dispatchBarrel.list()) do
                 dispatchBarrel.pushItems(cfg.vault_name, slot)
             end
+            local missingName = item == "<any_planks>" and "planks" or realItem
             return false,
-                ("Not enough %s: need %d, have %d"):format(realItem, count, moved)
+                ("Not enough %s: need %d, have %d"):format(missingName, count, moved)
         end
     end
 
