@@ -291,7 +291,15 @@ local function chooseMuzzleVelocity()
     print("  2) Robins (charges + cannon config)")
     local mode = readNumber("Mode [1/2] (default 1): ", 1)
     if mode == 1 then
-        return readNumber("Muzzle velocity (m/s): ", 180), "manual"
+        local v0 = readNumber("Muzzle velocity (m/s): ", 180)
+        return v0, {
+            mode = "manual",
+            projectileName = "manual",
+            projectileMass = nil,
+            chargeEq = nil,
+            effectiveBarrels = nil,
+            velMult = nil,
+        }
     end
 
     local projMass, projName = chooseProjectileMass()
@@ -317,12 +325,27 @@ local function chooseMuzzleVelocity()
     local v0, err = calcMuzzleVelocity(chargeEq, barrelBlocks, projMass, velMult)
     if not v0 then
         print("Robins error: " .. tostring(err))
-        return readNumber("Enter velocity manually (m/s): ", 180), "fallback"
+        local v0f = readNumber("Enter velocity manually (m/s): ", 180)
+        return v0f, {
+            mode = "manual",
+            projectileName = projName,
+            projectileMass = projMass,
+            chargeEq = chargeEq,
+            effectiveBarrels = barrelBlocks,
+            velMult = velMult,
+        }
     end
 
     print(string.format("Projectile: %s (%.1f kg)", projName, projMass))
     print(string.format("Computed v0: %.2f m/s", v0))
-    return v0, "robins"
+    return v0, {
+        mode = "robins",
+        projectileName = projName,
+        projectileMass = projMass,
+        chargeEq = chargeEq,
+        effectiveBarrels = barrelBlocks,
+        velMult = velMult,
+    }
 end
 
 local function promptTarget()
@@ -336,6 +359,39 @@ local function promptTarget()
     return v(tx, ty, tz), arc
 end
 
+local function promptTargetOnly(currentTarget)
+    print("")
+    local tx = readNumber(string.format("Target X [%.2f]: ", currentTarget.x), currentTarget.x)
+    local ty = readNumber(string.format("Target Y [%.2f]: ", currentTarget.y), currentTarget.y)
+    local tz = readNumber(string.format("Target Z [%.2f]: ", currentTarget.z), currentTarget.z)
+    return v(tx, ty, tz)
+end
+
+local function quickChangeProjectile(speedCfg)
+    if speedCfg.mode ~= "robins" then
+        print("Quick projectile swap needs Robins mode (V to reconfigure).")
+        sleep(1.0)
+        return nil
+    end
+
+    local newMass, newName = chooseProjectileMass()
+    local v0, err = calcMuzzleVelocity(
+        speedCfg.chargeEq,
+        speedCfg.effectiveBarrels,
+        newMass,
+        speedCfg.velMult
+    )
+    if not v0 then
+        print("Recompute error: " .. tostring(err))
+        sleep(1.0)
+        return nil
+    end
+
+    speedCfg.projectileMass = newMass
+    speedCfg.projectileName = newName
+    return v0
+end
+
 local pendingFire = false
 local running = true
 
@@ -344,8 +400,13 @@ local function main()
     setComputerControl(mount)
 
     local target, arc = promptTarget()
-    local muzzleSpeed, speedMode = chooseMuzzleVelocity()
+    local muzzleSpeed, speedCfg = chooseMuzzleVelocity()
     local compensateMotion = readYesNo("Compensate ship motion? [Y/n]: ", true)
+
+    local pendingRetarget = false
+    local pendingArcToggle = false
+    local pendingVelocityReconfig = false
+    local pendingProjectileSwap = false
 
     local lastTime = os.epoch("utc") / 1000
     local lastShipPos = nil
@@ -354,6 +415,24 @@ local function main()
 
     local function controlLoop()
         while running do
+            if pendingRetarget then
+                pendingRetarget = false
+                target = promptTargetOnly(target)
+            end
+            if pendingArcToggle then
+                pendingArcToggle = false
+                arc = (arc == "low") and "high" or "low"
+            end
+            if pendingVelocityReconfig then
+                pendingVelocityReconfig = false
+                muzzleSpeed, speedCfg = chooseMuzzleVelocity()
+            end
+            if pendingProjectileSwap then
+                pendingProjectileSwap = false
+                local vNew = quickChangeProjectile(speedCfg)
+                if vNew then muzzleSpeed = vNew end
+            end
+
             local now = os.epoch("utc") / 1000
             local dt = math.max(1e-3, now - lastTime)
 
@@ -405,11 +484,19 @@ local function main()
             term.clear()
             term.setCursorPos(1, 1)
             print("=== Artillery (Direct cannon_mount) ===")
-            print(string.format("Source:%s  Arc:%s  v0:%.2f (%s)", source, arc, muzzleSpeed, speedMode))
+            print(string.format("Source:%s  Arc:%s  v0:%.2f (%s)", source, arc, muzzleSpeed, speedCfg.mode))
             print(string.format("Yaw mode: %s / %s", CONFIG.world_yaw_mode, CONFIG.yaw_command_mode))
             print(string.format("Target: (%.2f, %.2f, %.2f)", target.x, target.y, target.z))
             print(string.format("Shootr: (%.2f, %.2f, %.2f)", shooterPos.x, shooterPos.y, shooterPos.z))
             print(string.format("Vel   : (%.2f, %.2f, %.2f)", shooterVel.x, shooterVel.y, shooterVel.z))
+            if speedCfg.projectileName then
+                local m = speedCfg.projectileMass
+                if m then
+                    print(string.format("Proj  : %s (%.1f kg)", speedCfg.projectileName, m))
+                else
+                    print(string.format("Proj  : %s", speedCfg.projectileName))
+                end
+            end
             if shipHeading then
                 print(string.format("Heading: %.2f", shipHeading))
             else
@@ -422,7 +509,7 @@ local function main()
                 print("No solution: " .. tostring(err))
             end
             print("")
-            print("F=fire  Q=quit")
+            print("F=fire  A=arc  T=retarget  P=projectile  V=velocity  Q=quit")
 
             lastTime = now
             sleep(CONFIG.update_interval_s)
@@ -434,6 +521,14 @@ local function main()
             local _, key = os.pullEvent("key")
             if key == keys.f then
                 pendingFire = true
+            elseif key == keys.a then
+                pendingArcToggle = true
+            elseif key == keys.t then
+                pendingRetarget = true
+            elseif key == keys.p then
+                pendingProjectileSwap = true
+            elseif key == keys.v then
+                pendingVelocityReconfig = true
             elseif key == keys.q then
                 running = false
             end
