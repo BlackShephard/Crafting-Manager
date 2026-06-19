@@ -116,12 +116,16 @@ end
 local function isGenericPlanksTag(name)
     if type(name) ~= "string" then return false end
     local key = name:gsub("^TODO:", "")
-    return key == "c:planks" or key == "o:planks"
+    return key == "c:planks"
+        or key == "o:planks"
+        or key == "minecraft:planks"
+        or key == "planks"
 end
 
 local function isPlankItem(name)
     local key = resolveItem(name)
-    return type(key) == "string" and key:sub(-7) == "_planks"
+    return type(key) == "string"
+        and (key:sub(-7) == "_planks" or key:sub(-6) == "planks")
 end
 
 -- ── Crafting logic ──────────────────────────────────────────
