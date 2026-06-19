@@ -25,7 +25,7 @@ local CONFIG = {
     invert_pitch = false,
 
     -- Arrow-key nudge step while on the firing screen.
-    nudge_step_deg = 0.5,
+    nudge_step_deg = 0.1,
 
     min_pitch = -10,
     max_pitch = 85,
