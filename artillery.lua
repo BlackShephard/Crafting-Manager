@@ -3,7 +3,7 @@
 -- Uses Sable pose first (if available), with mount position fallback.
 
 local CONFIG = {
-    gravity = 16.7,
+    gravity = 9.81,
     update_interval_s = 0.10,
     fire_hold_s = 0.20,
     velocity_alpha = 0.70,
@@ -23,6 +23,9 @@ local CONFIG = {
     pitch_offset_deg = 0,
     invert_yaw = false,
     invert_pitch = false,
+
+    -- Arrow-key nudge step while on the firing screen.
+    nudge_step_deg = 0.5,
 
     min_pitch = -10,
     max_pitch = 85,
@@ -45,8 +48,8 @@ local POWDER_MASS = 121.593455168150
 local CHARGE_LENGTH = 1.0
 
 local CANNON = {
-    barrels = 8,
-    chambers = 2,
+    barrels = 6,
+    chambers = 1,
     manual_effective_barrels = nil,
 }
 
@@ -587,8 +590,10 @@ local function main()
             else
                 print("No solution: " .. tostring(err))
             end
+            print(string.format("Trim  yaw/pitch: %+.2f / %+.2f  (arrows to nudge)",
+                CONFIG.yaw_offset_deg, CONFIG.pitch_offset_deg))
             print("")
-            print("F=fire  A=arc  T=retarget  P=projectile  V=velocity  C=calibrate  Q=quit")
+            print("F=fire  A=arc  T=retarget  P=proj  V=vel  C=cal  arrows=trim  Q=quit")
 
             lastTime = now
             sleep(CONFIG.update_interval_s)
@@ -611,6 +616,14 @@ local function main()
                 pendingVelocityReconfig = true
             elseif key == keys.c then
                 pendingCalibrate = true
+            elseif key == keys.up then
+                CONFIG.pitch_offset_deg = CONFIG.pitch_offset_deg + CONFIG.nudge_step_deg
+            elseif key == keys.down then
+                CONFIG.pitch_offset_deg = CONFIG.pitch_offset_deg - CONFIG.nudge_step_deg
+            elseif key == keys.right then
+                CONFIG.yaw_offset_deg = CONFIG.yaw_offset_deg + CONFIG.nudge_step_deg
+            elseif key == keys.left then
+                CONFIG.yaw_offset_deg = CONFIG.yaw_offset_deg - CONFIG.nudge_step_deg
             elseif key == keys.q then
                 running = false
             end
