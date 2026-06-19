@@ -13,7 +13,7 @@
 -- Fields:
 --   id           unique recipe identifier (string)
 --   name         display name shown in the compound plan panel
---   type         machine type: "press" | "mix" | "fan_wash" | ...
+--   type         machine type: "press" | "mix" | "saw" | "fan_wash" | ...
 --                (used for the [PRESS] / [MIX] label in the UI)
 --   station      Create frogport/packager address the package is
 --                sent to (must match the label on the receiving
@@ -29,56 +29,56 @@
 return {
 
     -- ================================================================
-    --  LOG STRIPPER  --  Deployer with axe
-    --  station address: "strip_station"
-    --  Feed raw log; deployer strips it and returns stripped log.
+    --  LOG STRIPPER  --  Create saw processing
+    --  station address: "saw_station"
+    --  Feed raw log; saw strips it and returns stripped log.
     -- ================================================================
 
     {
         id="strip_oak_log",       name="Stripped Oak Log",
-        type="deploy", station="strip_station",
+        type="saw", station="saw_station",
         output="minecraft:stripped_oak_log",    output_count=1,
         ingredients = { {item="minecraft:oak_log", count=1} },
     },
     {
         id="strip_birch_log",     name="Stripped Birch Log",
-        type="deploy", station="strip_station",
+        type="saw", station="saw_station",
         output="minecraft:stripped_birch_log",  output_count=1,
         ingredients = { {item="minecraft:birch_log", count=1} },
     },
     {
         id="strip_spruce_log",    name="Stripped Spruce Log",
-        type="deploy", station="strip_station",
+        type="saw", station="saw_station",
         output="minecraft:stripped_spruce_log", output_count=1,
         ingredients = { {item="minecraft:spruce_log", count=1} },
     },
     {
         id="strip_jungle_log",    name="Stripped Jungle Log",
-        type="deploy", station="strip_station",
+        type="saw", station="saw_station",
         output="minecraft:stripped_jungle_log", output_count=1,
         ingredients = { {item="minecraft:jungle_log", count=1} },
     },
     {
         id="strip_acacia_log",    name="Stripped Acacia Log",
-        type="deploy", station="strip_station",
+        type="saw", station="saw_station",
         output="minecraft:stripped_acacia_log", output_count=1,
         ingredients = { {item="minecraft:acacia_log", count=1} },
     },
     {
         id="strip_dark_oak_log",  name="Stripped Dark Oak Log",
-        type="deploy", station="strip_station",
+        type="saw", station="saw_station",
         output="minecraft:stripped_dark_oak_log", output_count=1,
         ingredients = { {item="minecraft:dark_oak_log", count=1} },
     },
     {
         id="strip_mangrove_log",  name="Stripped Mangrove Log",
-        type="deploy", station="strip_station",
+        type="saw", station="saw_station",
         output="minecraft:stripped_mangrove_log", output_count=1,
         ingredients = { {item="minecraft:mangrove_log", count=1} },
     },
     {
         id="strip_cherry_log",    name="Stripped Cherry Log",
-        type="deploy", station="strip_station",
+        type="saw", station="saw_station",
         output="minecraft:stripped_cherry_log", output_count=1,
         ingredients = { {item="minecraft:cherry_log", count=1} },
     },
