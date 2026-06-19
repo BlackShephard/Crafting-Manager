@@ -21,6 +21,12 @@ local CONFIG = {
 
     yaw_offset_deg = 0,
     pitch_offset_deg = 0,
+
+    -- Physical assembly orientation of the cannon.
+    -- 0  = cannon assembled horizontally (normal, barrel points forward at pitch 0).
+    -- 90 = cannon assembled vertically upward (barrel points straight up at pitch 0).
+    -- The script subtracts this from the ballistic pitch to produce the mount command.
+    mount_pitch_zero_deg = 0,
     invert_yaw = false,
     invert_pitch = false,
 
@@ -311,6 +317,10 @@ end
 
 local function toCommandPitch(pitchDeg)
     local p = CONFIG.invert_pitch and -pitchDeg or pitchDeg
+    -- Compensate for physical mount assembly angle:
+    -- ballistic pitch is always relative to horizontal; subtract the mount's
+    -- zero-angle so the command is in the mount's own reference frame.
+    p = p - CONFIG.mount_pitch_zero_deg
     p = p + CONFIG.pitch_offset_deg
     return clamp(p, CONFIG.min_pitch, CONFIG.max_pitch)
 end
