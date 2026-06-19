@@ -27,6 +27,10 @@ local CONFIG = {
     min_pitch = -10,
     max_pitch = 85,
     default_arc = "low",
+
+    -- Some Sable/VS environments expose coordinates in wrapped shipyard space.
+    -- If nonzero, shooter X/Z are unwrapped to the nearest equivalent near target.
+    coord_wrap_xz = 20480000,
 }
 
 -- Robins interior-ballistics constants from cbc_going_ballistic defaults.json
@@ -113,6 +117,28 @@ local function vnorm(a)
     local m = vlen(a)
     if m < 1e-9 then return nil end
     return v(a.x / m, a.y / m, a.z / m)
+end
+
+local function roundNearest(x)
+    if x >= 0 then
+        return math.floor(x + 0.5)
+    end
+    return math.ceil(x - 0.5)
+end
+
+local function unwrapNear(value, reference, wrap)
+    if not wrap or wrap <= 0 then return value end
+    return value - roundNearest((value - reference) / wrap) * wrap
+end
+
+local function normalizeShooterToTarget(shooterPos, targetPos)
+    local w = CONFIG.coord_wrap_xz
+    if not w or w <= 0 then return shooterPos end
+    return v(
+        unwrapNear(shooterPos.x, targetPos.x, w),
+        shooterPos.y,
+        unwrapNear(shooterPos.z, targetPos.z, w)
+    )
 end
 
 local function getMount()
@@ -466,7 +492,11 @@ local function main()
                 shooterVel = compensateMotion and velEst or v(0, 0, 0)
             end
 
-            local sol, err = solveBallistic(target, shooterPos, shooterVel, muzzleSpeed, arc)
+            -- Normalize wrapped ship-space coordinates into the nearest world
+            -- equivalent around target to avoid false "out of range" results.
+            local shooterPosNorm = normalizeShooterToTarget(shooterPos, target)
+
+            local sol, err = solveBallistic(target, shooterPosNorm, shooterVel, muzzleSpeed, arc)
             local cmdYaw, cmdPitch
             if sol then
                 cmdYaw = toCommandYaw(sol.worldYaw, shipHeading)
@@ -487,7 +517,7 @@ local function main()
             print(string.format("Source:%s  Arc:%s  v0:%.2f (%s)", source, arc, muzzleSpeed, speedCfg.mode))
             print(string.format("Yaw mode: %s / %s", CONFIG.world_yaw_mode, CONFIG.yaw_command_mode))
             print(string.format("Target: (%.2f, %.2f, %.2f)", target.x, target.y, target.z))
-            print(string.format("Shootr: (%.2f, %.2f, %.2f)", shooterPos.x, shooterPos.y, shooterPos.z))
+            print(string.format("Shootr: (%.2f, %.2f, %.2f)", shooterPosNorm.x, shooterPosNorm.y, shooterPosNorm.z))
             print(string.format("Vel   : (%.2f, %.2f, %.2f)", shooterVel.x, shooterVel.y, shooterVel.z))
             if speedCfg.projectileName then
                 local m = speedCfg.projectileMass
