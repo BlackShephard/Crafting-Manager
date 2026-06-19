@@ -1,0 +1,449 @@
+-- artillery.lua
+-- Direct cannon_mount artillery computer (no gear server).
+-- Uses Sable pose first (if available), with mount position fallback.
+
+local CONFIG = {
+    gravity = 48.5,
+    update_interval_s = 0.10,
+    fire_hold_s = 0.20,
+    velocity_alpha = 0.70,
+
+    -- World yaw definition:
+    -- "mc" -> 0=N(-Z), 90=E(+X), 180=S(+Z), 270=W(-X)
+    -- "xz" -> 0=+X, 90=+Z, 180=-X, 270=-Z
+    world_yaw_mode = "mc",
+
+    -- Command mode for cannon mount yaw:
+    -- "world"         -> setTargetAngles(yaw_world, pitch)
+    -- "ship_relative" -> setTargetAngles(yaw_world - heading + auto_yaw_offset, pitch)
+    yaw_command_mode = "world",
+    auto_yaw_offset = 270,
+
+    yaw_offset_deg = 0,
+    pitch_offset_deg = 0,
+    invert_yaw = false,
+    invert_pitch = false,
+
+    min_pitch = -10,
+    max_pitch = 85,
+    default_arc = "low",
+}
+
+-- Robins interior-ballistics constants from cbc_going_ballistic defaults.json
+local ROBINS_K = 606.8568
+local POWDER_MASS = 121.593455168150
+local CHARGE_LENGTH = 1.0
+
+local CANNON = {
+    barrels = 8,
+    chambers = 2,
+    manual_effective_barrels = nil,
+}
+
+local PROJECTILES = {
+    {name = "Solid Shot",       mass = 3519.5},
+    {name = "AP Shot",          mass = 3455.5},
+    {name = "Shrapnel Shell",   mass = 3410.6},
+    {name = "AP Shell",         mass = 3159.9},
+    {name = "HE Shell",         mass = 2922.4},
+    {name = "Fluid Shell",      mass = 2400.0},
+    {name = "Drop Mortar Shell", mass = 2255.5},
+    {name = "Mortar Stone",     mass = 1162.3},
+    {name = "Smoke Shell",      mass = 1037.0},
+    {name = "Grapeshot Shell",  mass = 731.1},
+}
+
+local function clamp(x, lo, hi)
+    if x < lo then return lo end
+    if x > hi then return hi end
+    return x
+end
+
+local function wrap360(a)
+    return ((a % 360) + 360) % 360
+end
+
+local function readNumber(prompt, default)
+    while true do
+        write(prompt)
+        local s = read()
+        if s == "" and default ~= nil then return default end
+        local n = tonumber(s)
+        if n then return n end
+        print("  Enter a number")
+    end
+end
+
+local function readYesNo(prompt, defaultYes)
+    while true do
+        write(prompt)
+        local s = string.lower(read())
+        if s == "" then return defaultYes end
+        if s == "y" or s == "yes" then return true end
+        if s == "n" or s == "no" then return false end
+        print("  Enter y or n")
+    end
+end
+
+local function v(x, y, z)
+    return {x = x, y = y, z = z}
+end
+
+local function vsub(a, b)
+    return v(a.x - b.x, a.y - b.y, a.z - b.z)
+end
+
+local function vadd(a, b)
+    return v(a.x + b.x, a.y + b.y, a.z + b.z)
+end
+
+local function vmul(a, s)
+    return v(a.x * s, a.y * s, a.z * s)
+end
+
+local function vdot(a, b)
+    return a.x * b.x + a.y * b.y + a.z * b.z
+end
+
+local function vlen(a)
+    return math.sqrt(vdot(a, a))
+end
+
+local function vnorm(a)
+    local m = vlen(a)
+    if m < 1e-9 then return nil end
+    return v(a.x / m, a.y / m, a.z / m)
+end
+
+local function getMount()
+    local m = peripheral.find("cannon_mount")
+    if not m then error("No cannon_mount peripheral found") end
+    return m
+end
+
+local function getMountPos(info)
+    return v(tonumber(info.x) or 0, tonumber(info.y) or 0, tonumber(info.z) or 0)
+end
+
+local function quatHeadingDegrees(o)
+    local w = o.a
+    local x = o.v.x
+    local y = o.v.y
+    local z = o.v.z
+    local vx, vy, vz = 1, 0, 0
+    local tx = 2 * (y * vz - z * vy)
+    local ty = 2 * (z * vx - x * vz)
+    local tz = 2 * (x * vy - y * vx)
+    local fx = vx + w * tx + (y * tz - z * ty)
+    local fz = vz + w * tz + (x * ty - y * tx)
+    return wrap360(math.atan2(fx, -fz) * 180 / math.pi)
+end
+
+local function getSablePose()
+    if not sublevel or type(sublevel.getLogicalPose) ~= "function" then
+        return nil
+    end
+    local p = sublevel.getLogicalPose()
+    if not p or not p.position or not p.orientation then
+        return nil
+    end
+    return {
+        pos = v(p.position.x, p.position.y, p.position.z),
+        heading = quatHeadingDegrees(p.orientation),
+    }
+end
+
+local function calcEffectiveBarrels(chargeEq)
+    if CANNON.manual_effective_barrels then
+        return CANNON.manual_effective_barrels, "manual"
+    end
+    local freeChambers = math.max(0, CANNON.chambers - chargeEq)
+    return CANNON.barrels + freeChambers, "auto"
+end
+
+local function calcMuzzleVelocity(chargeEq, barrelBlocks, projMass, velMult)
+    if barrelBlocks <= chargeEq then
+        return nil, string.format("barrel too short (need > %.2f)", chargeEq)
+    end
+    local p = chargeEq * POWDER_MASS
+    local L = barrelBlocks * CHARGE_LENGTH
+    local c = chargeEq * CHARGE_LENGTH
+    local v2 = (p / (projMass + p / 3)) * math.log(L / c)
+    if v2 <= 0 then return nil, "invalid interior-ballistics inputs" end
+    return ROBINS_K * (velMult or 1.0) * math.sqrt(v2), nil
+end
+
+local function worldYawFromUnit(u)
+    if CONFIG.world_yaw_mode == "xz" then
+        return wrap360(math.atan2(u.z, u.x) * 180 / math.pi)
+    end
+    return wrap360(math.atan2(u.x, -u.z) * 180 / math.pi)
+end
+
+local function solveBallistic(target, shooterPos, shooterVel, muzzleSpeed, arc)
+    local r = vsub(target, shooterPos)
+    local gVec = v(0, -CONFIG.gravity, 0)
+
+    local function f(t)
+        local a = vsub(vsub(r, vmul(shooterVel, t)), vmul(gVec, 0.5 * t * t))
+        return vdot(a, a) - (muzzleSpeed * t) * (muzzleSpeed * t)
+    end
+
+    local roots = {}
+    local dt = 0.02
+    local tMax = 120.0
+    local t0 = 0.02
+    local f0 = f(t0)
+    local t = t0 + dt
+
+    while t <= tMax do
+        local f1 = f(t)
+        if f0 == 0 or (f0 * f1 < 0) then
+            local a = t - dt
+            local b = t
+            local fa = f0
+            for _ = 1, 40 do
+                local m = 0.5 * (a + b)
+                local fm = f(m)
+                if math.abs(fm) < 1e-8 then
+                    a, b = m, m
+                    break
+                end
+                if fa * fm <= 0 then
+                    b = m
+                else
+                    a = m
+                    fa = fm
+                end
+            end
+            roots[#roots + 1] = 0.5 * (a + b)
+            if #roots >= 6 then break end
+        end
+        t0 = t
+        f0 = f1
+        t = t + dt
+    end
+
+    if #roots == 0 then return nil, "target out of range" end
+    local tof = (arc == "high") and roots[#roots] or roots[1]
+
+    local a = vsub(vsub(r, vmul(shooterVel, tof)), vmul(gVec, 0.5 * tof * tof))
+    local u = vnorm(vmul(a, 1 / (muzzleSpeed * tof)))
+    if not u then return nil, "degenerate solution" end
+
+    local worldYaw = worldYawFromUnit(u)
+    local pitch = math.asin(clamp(u.y, -1, 1)) * 180 / math.pi
+
+    return {
+        worldYaw = worldYaw,
+        pitch = pitch,
+        tof = tof,
+        range = math.sqrt(r.x * r.x + r.z * r.z),
+        dy = r.y,
+    }
+end
+
+local function toCommandYaw(worldYaw, shipHeading)
+    local yaw = worldYaw
+    if CONFIG.yaw_command_mode == "ship_relative" and shipHeading then
+        yaw = worldYaw - shipHeading + CONFIG.auto_yaw_offset
+    end
+    if CONFIG.invert_yaw then yaw = -yaw end
+    yaw = yaw + CONFIG.yaw_offset_deg
+    return wrap360(yaw)
+end
+
+local function toCommandPitch(pitchDeg)
+    local p = CONFIG.invert_pitch and -pitchDeg or pitchDeg
+    p = p + CONFIG.pitch_offset_deg
+    return clamp(p, CONFIG.min_pitch, CONFIG.max_pitch)
+end
+
+local function setComputerControl(mount)
+    if type(mount.setComputerControl) == "function" then
+        mount.setComputerControl(true)
+    end
+    if type(mount.assemble) == "function" then
+        mount.assemble(true)
+    end
+end
+
+local function chooseProjectileMass()
+    print("")
+    print("Projectile mass:")
+    print("  1) From table")
+    print("  2) Custom")
+    local mode = readNumber("Mode [1/2] (default 1): ", 1)
+    if mode == 2 then
+        return readNumber("Mass (kg): ", 2922.4), "Custom"
+    end
+    for i, p in ipairs(PROJECTILES) do
+        print(string.format("  %2d) %-18s %.1f kg", i, p.name, p.mass))
+    end
+    local idx = math.floor(clamp(readNumber("Select [5=HE Shell]: ", 5), 1, #PROJECTILES))
+    return PROJECTILES[idx].mass, PROJECTILES[idx].name
+end
+
+local function chooseMuzzleVelocity()
+    print("")
+    print("Velocity mode:")
+    print("  1) Direct velocity")
+    print("  2) Robins (charges + cannon config)")
+    local mode = readNumber("Mode [1/2] (default 1): ", 1)
+    if mode == 1 then
+        return readNumber("Muzzle velocity (m/s): ", 180), "manual"
+    end
+
+    local projMass, projName = chooseProjectileMass()
+    local chargeEq = readNumber("Loaded charge equivalents: ", 2)
+    local eff, effMode = calcEffectiveBarrels(chargeEq)
+
+    print(string.format("Cannon config: barrels=%s chambers=%s", tostring(CANNON.barrels), tostring(CANNON.chambers)))
+    print(string.format("Effective barrels (%s): %.2f", effMode, eff))
+
+    write(string.format("Override effective barrels [%.2f]: ", eff))
+    local s = read()
+    local barrelBlocks = eff
+    if s ~= "" then
+        local n = tonumber(s)
+        if n then barrelBlocks = n end
+    end
+    while barrelBlocks <= chargeEq do
+        print(string.format("Need effective barrels > %.2f", chargeEq))
+        barrelBlocks = readNumber("Effective barrels: ", eff)
+    end
+
+    local velMult = readNumber("Velocity multiplier [1.0]: ", 1.0)
+    local v0, err = calcMuzzleVelocity(chargeEq, barrelBlocks, projMass, velMult)
+    if not v0 then
+        print("Robins error: " .. tostring(err))
+        return readNumber("Enter velocity manually (m/s): ", 180), "fallback"
+    end
+
+    print(string.format("Projectile: %s (%.1f kg)", projName, projMass))
+    print(string.format("Computed v0: %.2f m/s", v0))
+    return v0, "robins"
+end
+
+local function promptTarget()
+    print("")
+    local tx = readNumber("Target X: ")
+    local ty = readNumber("Target Y: ")
+    local tz = readNumber("Target Z: ")
+    write("Arc low/high [" .. CONFIG.default_arc .. "]: ")
+    local a = string.lower(read())
+    local arc = (a == "high") and "high" or "low"
+    return v(tx, ty, tz), arc
+end
+
+local pendingFire = false
+local running = true
+
+local function main()
+    local mount = getMount()
+    setComputerControl(mount)
+
+    local target, arc = promptTarget()
+    local muzzleSpeed, speedMode = chooseMuzzleVelocity()
+    local compensateMotion = readYesNo("Compensate ship motion? [Y/n]: ", true)
+
+    local lastTime = os.epoch("utc") / 1000
+    local lastShipPos = nil
+    local velEst = v(0, 0, 0)
+    local mountOffset = nil
+
+    local function controlLoop()
+        while running do
+            local now = os.epoch("utc") / 1000
+            local dt = math.max(1e-3, now - lastTime)
+
+            local info = mount.getInfo()
+            local rawMountPos = getMountPos(info)
+
+            local pose = getSablePose()
+            local source = "mount"
+            local shipHeading = nil
+            local shooterPos = rawMountPos
+            local shooterVel = v(0, 0, 0)
+
+            if pose then
+                source = "sable"
+                shipHeading = pose.heading
+
+                if not mountOffset then
+                    mountOffset = vsub(rawMountPos, pose.pos)
+                end
+                shooterPos = vadd(pose.pos, mountOffset)
+
+                if lastShipPos then
+                    local rawVel = vmul(vsub(pose.pos, lastShipPos), 1 / dt)
+                    velEst = v(
+                        CONFIG.velocity_alpha * velEst.x + (1 - CONFIG.velocity_alpha) * rawVel.x,
+                        CONFIG.velocity_alpha * velEst.y + (1 - CONFIG.velocity_alpha) * rawVel.y,
+                        CONFIG.velocity_alpha * velEst.z + (1 - CONFIG.velocity_alpha) * rawVel.z
+                    )
+                end
+                lastShipPos = pose.pos
+                shooterVel = compensateMotion and velEst or v(0, 0, 0)
+            end
+
+            local sol, err = solveBallistic(target, shooterPos, shooterVel, muzzleSpeed, arc)
+            local cmdYaw, cmdPitch
+            if sol then
+                cmdYaw = toCommandYaw(sol.worldYaw, shipHeading)
+                cmdPitch = toCommandPitch(sol.pitch)
+                mount.setTargetAngles(cmdYaw, cmdPitch)
+            end
+
+            if pendingFire then
+                pendingFire = false
+                mount.fire(true)
+                sleep(CONFIG.fire_hold_s)
+                mount.fire(false)
+            end
+
+            term.clear()
+            term.setCursorPos(1, 1)
+            print("=== Artillery (Direct cannon_mount) ===")
+            print(string.format("Source:%s  Arc:%s  v0:%.2f (%s)", source, arc, muzzleSpeed, speedMode))
+            print(string.format("Yaw mode: %s / %s", CONFIG.world_yaw_mode, CONFIG.yaw_command_mode))
+            print(string.format("Target: (%.2f, %.2f, %.2f)", target.x, target.y, target.z))
+            print(string.format("Shootr: (%.2f, %.2f, %.2f)", shooterPos.x, shooterPos.y, shooterPos.z))
+            print(string.format("Vel   : (%.2f, %.2f, %.2f)", shooterVel.x, shooterVel.y, shooterVel.z))
+            if shipHeading then
+                print(string.format("Heading: %.2f", shipHeading))
+            else
+                print("Heading: N/A")
+            end
+            if sol then
+                print(string.format("Sol yaw/pitch: %.2f / %.2f  TOF: %.2f", sol.worldYaw, sol.pitch, sol.tof))
+                print(string.format("Cmd yaw/pitch: %.2f / %.2f", cmdYaw, cmdPitch))
+            else
+                print("No solution: " .. tostring(err))
+            end
+            print("")
+            print("F=fire  Q=quit")
+
+            lastTime = now
+            sleep(CONFIG.update_interval_s)
+        end
+    end
+
+    local function keyLoop()
+        while running do
+            local _, key = os.pullEvent("key")
+            if key == keys.f then
+                pendingFire = true
+            elseif key == keys.q then
+                running = false
+            end
+        end
+    end
+
+    parallel.waitForAny(controlLoop, keyLoop)
+    term.clear()
+    term.setCursorPos(1, 1)
+    print("Artillery stopped")
+end
+
+main()
