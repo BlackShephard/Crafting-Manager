@@ -1361,8 +1361,20 @@ local function handleQueueTouch(x, y, W, H)
     local rightX = leftW + 2
     local listH  = H - 5
 
+    -- Cancel button row (H-2) must be handled before the queue list hitbox,
+    -- because the list area reaches down to H-2 and would otherwise swallow it.
+    if y == H - 2 and x >= rightX then
+        if ui.queueSel >= 1 and ui.queueSel <= #queue then
+            local job = table.remove(queue, ui.queueSel)
+            ui.status  = ("Cancelled: %s x%d"):format(job.rec.name, job.qty)
+            ui.queueSel = math.min(math.max(0, ui.queueSel - 1), #queue)
+            tryDispatchNext()
+        end
+        return
+    end
+
     -- Right panel: waiting queue list
-    if x >= rightX and y >= 4 and y <= 3 + listH then
+    if x >= rightX and y >= 4 and y <= H - 3 then
         local idx = y - 3
         if idx >= 1 and idx <= #queue then
             -- Tap same item again to deselect
@@ -1374,15 +1386,6 @@ local function handleQueueTouch(x, y, W, H)
             end
         end
         return
-    end
-
-    -- Cancel button row (H-2)
-    if y == H - 2 and x >= leftW + 2 then
-        if ui.queueSel >= 1 and ui.queueSel <= #queue then
-            local job = table.remove(queue, ui.queueSel)
-            ui.status  = ("Cancelled: %s x%d"):format(job.rec.name, job.qty)
-            ui.queueSel = math.min(math.max(0, ui.queueSel - 1), #queue)
-        end
     end
 end
 
