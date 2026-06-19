@@ -31,6 +31,12 @@ local CONFIG = {
     -- Some Sable/VS environments expose coordinates in wrapped shipyard space.
     -- If nonzero, shooter X/Z are unwrapped to the nearest equivalent near target.
     coord_wrap_xz = 20480000,
+
+    -- Manual additive offset for Sable coordinates.
+    -- Use C key in runtime to calibrate from known current world position.
+    sable_offset_x = 0,
+    sable_offset_y = 0,
+    sable_offset_z = 0,
 }
 
 -- Robins interior-ballistics constants from cbc_going_ballistic defaults.json
@@ -174,9 +180,37 @@ local function getSablePose()
         return nil
     end
     return {
-        pos = v(p.position.x, p.position.y, p.position.z),
+        pos = v(
+            p.position.x + CONFIG.sable_offset_x,
+            p.position.y + CONFIG.sable_offset_y,
+            p.position.z + CONFIG.sable_offset_z
+        ),
         heading = quatHeadingDegrees(p.orientation),
     }
+end
+
+local function calibrateSableOffset(currentPos)
+    term.clear()
+    term.setCursorPos(1, 1)
+    print("=== Sable Calibration ===")
+    print("Enter your actual current world position:")
+    print(string.format("Current Sable: (%.2f, %.2f, %.2f)", currentPos.x, currentPos.y, currentPos.z))
+    print("")
+    local realX = readNumber("Actual X: ")
+    local realY = readNumber("Actual Y: ")
+    local realZ = readNumber("Actual Z: ")
+
+    CONFIG.sable_offset_x = CONFIG.sable_offset_x + (realX - currentPos.x)
+    CONFIG.sable_offset_y = CONFIG.sable_offset_y + (realY - currentPos.y)
+    CONFIG.sable_offset_z = CONFIG.sable_offset_z + (realZ - currentPos.z)
+
+    term.clear()
+    term.setCursorPos(1, 1)
+    print("Sable offsets updated:")
+    print(string.format("  x = %.2f", CONFIG.sable_offset_x))
+    print(string.format("  y = %.2f", CONFIG.sable_offset_y))
+    print(string.format("  z = %.2f", CONFIG.sable_offset_z))
+    sleep(1.0)
 end
 
 local function calcEffectiveBarrels(chargeEq)
@@ -433,6 +467,7 @@ local function main()
     local pendingArcToggle = false
     local pendingVelocityReconfig = false
     local pendingProjectileSwap = false
+    local pendingCalibrate = false
 
     local lastTime = os.epoch("utc") / 1000
     local lastShipPos = nil
@@ -492,6 +527,17 @@ local function main()
                 shooterVel = compensateMotion and velEst or v(0, 0, 0)
             end
 
+            if pendingCalibrate and pose then
+                pendingCalibrate = false
+                calibrateSableOffset(pose.pos)
+                lastShipPos = nil
+                mountOffset = nil
+                -- Rebuild pose/position on next loop with new offsets.
+                goto loop_sleep
+            elseif pendingCalibrate then
+                pendingCalibrate = false
+            end
+
             -- Normalize wrapped ship-space coordinates into the nearest world
             -- equivalent around target to avoid false "out of range" results.
             local shooterPosNorm = normalizeShooterToTarget(shooterPos, target)
@@ -516,6 +562,7 @@ local function main()
             print("=== Artillery (Direct cannon_mount) ===")
             print(string.format("Source:%s  Arc:%s  v0:%.2f (%s)", source, arc, muzzleSpeed, speedCfg.mode))
             print(string.format("Yaw mode: %s / %s", CONFIG.world_yaw_mode, CONFIG.yaw_command_mode))
+            print(string.format("Sable off: (%.1f, %.1f, %.1f)", CONFIG.sable_offset_x, CONFIG.sable_offset_y, CONFIG.sable_offset_z))
             print(string.format("Target: (%.2f, %.2f, %.2f)", target.x, target.y, target.z))
             print(string.format("Shootr: (%.2f, %.2f, %.2f)", shooterPosNorm.x, shooterPosNorm.y, shooterPosNorm.z))
             print(string.format("Vel   : (%.2f, %.2f, %.2f)", shooterVel.x, shooterVel.y, shooterVel.z))
@@ -539,8 +586,9 @@ local function main()
                 print("No solution: " .. tostring(err))
             end
             print("")
-            print("F=fire  A=arc  T=retarget  P=projectile  V=velocity  Q=quit")
+            print("F=fire  A=arc  T=retarget  P=projectile  V=velocity  C=calibrate  Q=quit")
 
+            ::loop_sleep::
             lastTime = now
             sleep(CONFIG.update_interval_s)
         end
@@ -559,6 +607,8 @@ local function main()
                 pendingProjectileSwap = true
             elseif key == keys.v then
                 pendingVelocityReconfig = true
+            elseif key == keys.c then
+                pendingCalibrate = true
             elseif key == keys.q then
                 running = false
             end
