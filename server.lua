@@ -440,6 +440,8 @@ local function dispatchCraft(rec, qty)
     return true
 end
 
+local buildCraftPlan
+
 local function tryDispatchNext()
     local i = 1
     while i <= #queue do
@@ -587,7 +589,7 @@ end
 -- Jobs are in execution order: leaf dependencies first, final recipe last.
 -- projected tracks items that earlier plan steps will produce, so we don't
 -- over-plan the same ingredient twice.
-local function buildCraftPlan(itemName, qty, plan, projected, depth)
+buildCraftPlan = function(itemName, qty, plan, projected, depth)
     plan      = plan      or {}
     projected = projected or {}
     depth     = depth     or 0
