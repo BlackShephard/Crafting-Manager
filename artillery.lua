@@ -527,13 +527,13 @@ local function main()
                 shooterVel = compensateMotion and velEst or v(0, 0, 0)
             end
 
+            local calibratedNow = false
             if pendingCalibrate and pose then
                 pendingCalibrate = false
                 calibrateSableOffset(pose.pos)
                 lastShipPos = nil
                 mountOffset = nil
-                -- Rebuild pose/position on next loop with new offsets.
-                goto loop_sleep
+                calibratedNow = true
             elseif pendingCalibrate then
                 pendingCalibrate = false
             end
@@ -542,19 +542,24 @@ local function main()
             -- equivalent around target to avoid false "out of range" results.
             local shooterPosNorm = normalizeShooterToTarget(shooterPos, target)
 
-            local sol, err = solveBallistic(target, shooterPosNorm, shooterVel, muzzleSpeed, arc)
-            local cmdYaw, cmdPitch
-            if sol then
-                cmdYaw = toCommandYaw(sol.worldYaw, shipHeading)
-                cmdPitch = toCommandPitch(sol.pitch)
-                mount.setTargetAngles(cmdYaw, cmdPitch)
-            end
+            local sol, err = nil, nil
+            local cmdYaw, cmdPitch = nil, nil
+            if not calibratedNow then
+                sol, err = solveBallistic(target, shooterPosNorm, shooterVel, muzzleSpeed, arc)
+                if sol then
+                    cmdYaw = toCommandYaw(sol.worldYaw, shipHeading)
+                    cmdPitch = toCommandPitch(sol.pitch)
+                    mount.setTargetAngles(cmdYaw, cmdPitch)
+                end
 
-            if pendingFire then
-                pendingFire = false
-                mount.fire(true)
-                sleep(CONFIG.fire_hold_s)
-                mount.fire(false)
+                if pendingFire then
+                    pendingFire = false
+                    mount.fire(true)
+                    sleep(CONFIG.fire_hold_s)
+                    mount.fire(false)
+                end
+            else
+                err = "Sable calibration updated"
             end
 
             term.clear()
@@ -588,7 +593,6 @@ local function main()
             print("")
             print("F=fire  A=arc  T=retarget  P=projectile  V=velocity  C=calibrate  Q=quit")
 
-            ::loop_sleep::
             lastTime = now
             sleep(CONFIG.update_interval_s)
         end
