@@ -3,7 +3,7 @@
 -- Uses Sable pose first (if available), with mount position fallback.
 
 local CONFIG = {
-    gravity = 48.5,
+    gravity = 16.7,
     update_interval_s = 0.10,
     fire_hold_s = 0.20,
     velocity_alpha = 0.70,
