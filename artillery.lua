@@ -28,9 +28,9 @@ local CONFIG = {
     max_pitch = 85,
     default_arc = "low",
 
-    -- Some Sable/VS environments expose coordinates in wrapped shipyard space.
-    -- If nonzero, shooter X/Z are unwrapped to the nearest equivalent near target.
-    coord_wrap_xz = 20480000,
+    -- Set nonzero only if Sable coordinates are wrapped/offset from world coords.
+    -- Leave at 0 (default) -- Sable logical pose is used directly like arty3.
+    coord_wrap_xz = 0,
 
     -- Manual additive offset for Sable coordinates.
     -- Use C key in runtime to calibrate from known current world position.
@@ -472,7 +472,6 @@ local function main()
     local lastTime = os.epoch("utc") / 1000
     local lastShipPos = nil
     local velEst = v(0, 0, 0)
-    local mountOffset = nil
 
     local function controlLoop()
         while running do
@@ -509,11 +508,8 @@ local function main()
             if pose then
                 source = "sable"
                 shipHeading = pose.heading
-
-                if not mountOffset then
-                    mountOffset = vsub(rawMountPos, pose.pos)
-                end
-                shooterPos = vadd(pose.pos, mountOffset)
+                -- Use Sable pose position directly (same as arty3).
+                shooterPos = pose.pos
 
                 if lastShipPos then
                     local rawVel = vmul(vsub(pose.pos, lastShipPos), 1 / dt)
@@ -532,15 +528,13 @@ local function main()
                 pendingCalibrate = false
                 calibrateSableOffset(pose.pos)
                 lastShipPos = nil
-                mountOffset = nil
                 calibratedNow = true
             elseif pendingCalibrate then
                 pendingCalibrate = false
             end
 
-            -- Normalize wrapped ship-space coordinates into the nearest world
-            -- equivalent around target to avoid false "out of range" results.
-            local shooterPosNorm = normalizeShooterToTarget(shooterPos, target)
+            -- Use shooter position directly from Sable (same as arty3).
+            local shooterPosNorm = shooterPos
 
             local sol, err = nil, nil
             local cmdYaw, cmdPitch = nil, nil
