@@ -226,12 +226,16 @@ end
 local function isGenericPlanksTag(name)
     if type(name) ~= "string" then return false end
     local key = name:gsub("^TODO:", "")
-    return key == "c:planks" or key == "o:planks"
+    return key == "c:planks"
+        or key == "o:planks"
+        or key == "minecraft:planks"
+        or key == "planks"
 end
 
 local function isPlankItem(name)
     local key = itemKey(name)
-    return type(key) == "string" and key:sub(-7) == "_planks"
+    return type(key) == "string"
+        and (key:sub(-7) == "_planks" or key:sub(-6) == "planks")
 end
 
 local function stockOf(itemName)
@@ -530,7 +534,7 @@ end
 local function maxCraftable(rec)
     local needed = {}
     for _, ing in ipairs(rec.ingredients) do
-        local item = itemKey(ing.item)
+        local item = isGenericPlanksTag(ing.item) and "c:planks" or itemKey(ing.item)
         needed[item] = (needed[item] or 0) + ing.count
     end
     if not next(needed) then return math.huge end
@@ -546,7 +550,7 @@ end
 local function getMissing(rec, qty)
     local needed = {}
     for _, ing in ipairs(rec.ingredients) do
-        local item = itemKey(ing.item)
+        local item = isGenericPlanksTag(ing.item) and "c:planks" or itemKey(ing.item)
         needed[item] = (needed[item] or 0) + ing.count * qty
     end
     local out = {}
