@@ -153,10 +153,6 @@ local function getMount()
     return m
 end
 
-local function getMountPos(info)
-    return v(tonumber(info.x) or 0, tonumber(info.y) or 0, tonumber(info.z) or 0)
-end
-
 local function quatHeadingDegrees(o)
     local w = o.a
     local x = o.v.x
@@ -471,6 +467,7 @@ local function main()
 
     local lastTime = os.epoch("utc") / 1000
     local lastShipPos = nil
+    local lastGoodSablePos = nil
     local velEst = v(0, 0, 0)
 
     local function controlLoop()
@@ -497,19 +494,17 @@ local function main()
             local dt = math.max(1e-3, now - lastTime)
 
             local info = mount.getInfo()
-            local rawMountPos = getMountPos(info)
 
             local pose = getSablePose()
-            local source = "mount"
+            local source = "sable"
             local shipHeading = nil
-            local shooterPos = rawMountPos
+            local shooterPos = lastGoodSablePos  -- hold last known until Sable updates
             local shooterVel = v(0, 0, 0)
 
             if pose then
-                source = "sable"
                 shipHeading = pose.heading
-                -- Use Sable pose position directly (same as arty3).
                 shooterPos = pose.pos
+                lastGoodSablePos = pose.pos
 
                 if lastShipPos then
                     local rawVel = vmul(vsub(pose.pos, lastShipPos), 1 / dt)
@@ -521,6 +516,14 @@ local function main()
                 end
                 lastShipPos = pose.pos
                 shooterVel = compensateMotion and velEst or v(0, 0, 0)
+            end
+
+            if not shooterPos then
+                -- Sable not yet available; wait.
+                term.clear(); term.setCursorPos(1,1)
+                print("Waiting for Sable position...")
+                sleep(CONFIG.update_interval_s)
+                goto continue
             end
 
             local calibratedNow = false
@@ -589,6 +592,7 @@ local function main()
 
             lastTime = now
             sleep(CONFIG.update_interval_s)
+            ::continue::
         end
     end
 
