@@ -510,11 +510,15 @@ local function dispatchProcess(rec, qty)
 
     local expected = qty * math.max(1, rec.output_count or 1)
     rednet.send(sid, {
-        type   = "PROCESS_REQUEST",
-        id     = id,
-        recipe = rec.id,
-        output = rec.output,
-        count  = expected,
+        type         = "PROCESS_REQUEST",
+        id           = id,
+        recipe       = rec.id,
+        output       = rec.output,
+        count        = expected,
+        crafts       = qty,
+        output_count = rec.output_count or 1,
+        ingredients  = rec.ingredients,
+        route        = rec.route or rec.saw_route,
     }, PROTO)
 
     local typeLabel = (rec.type or "process"):upper()

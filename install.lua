@@ -24,11 +24,13 @@ local files = {
     "server.lua",
     "station.lua",
     "processing_station.lua",
+    "saw_station.lua",
     "recipes.lua",
     "processing.lua",
     "config_server.lua",
     "config_station.lua",
     "config_processing_station.lua",
+    "config_saw_station.lua",
 }
 
 print("Installing from: " .. base)
@@ -63,4 +65,6 @@ if fail == 0 then
     print("                           run station.lua")
     print("  Processing station:      rename config_processing_station.lua -> config.lua")
     print("                           run processing_station.lua")
+    print("  Saw station:             rename config_saw_station.lua -> config.lua")
+    print("                           run saw_station.lua")
 end
