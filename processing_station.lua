@@ -97,13 +97,54 @@ local function waitForExactOutput(outputName, expected, timeout)
         outputName, expected, have)
 end
 
-local function sendOutputHome()
-    retPackager.setAddress(cfg.home_address)
-    local ok, err = pcall(retPackager.makePackage)
-    if not ok then
-        return false, "makePackage failed: " .. tostring(err)
+local function waitForBarrelDrained(outputName, timeout)
+    timeout = timeout or cfg.package_drain_timeout or 10
+    local deadline = os.epoch("utc") + timeout * 1000
+
+    while os.epoch("utc") < deadline do
+        local have, other = countOutput(outputName)
+        if #other > 0 then
+            return false, "Unexpected item in output barrel: " .. describeOther(other)
+        end
+        if have == 0 then return true end
+        os.sleep(0.5)
     end
-    return true
+
+    local have = countOutput(outputName)
+    return false, ("Packager did not drain output barrel (still have %d)"):format(have)
+end
+
+local function sendOutputHome(outputName, expected)
+    local attempts = cfg.package_attempts or 3
+    local settleDelay = cfg.package_settle_delay or 1
+
+    retPackager.setAddress(cfg.home_address)
+
+    for attempt = 1, attempts do
+        os.sleep(settleDelay)
+
+        local have, other = countOutput(outputName)
+        if #other > 0 then
+            return false, "Unexpected item in output barrel: " .. describeOther(other)
+        end
+        if have ~= expected then
+            return false, ("Output changed before packaging: %s has %d, expected %d"):format(
+                outputName, have, expected)
+        end
+
+        local ok, err = pcall(retPackager.makePackage)
+        if not ok then
+            return false, "makePackage failed: " .. tostring(err)
+        end
+
+        ok, err = waitForBarrelDrained(outputName)
+        if ok then return true end
+
+        print(("[WARN] Package attempt %d/%d did not drain barrel: %s"):format(
+            attempt, attempts, tostring(err)))
+    end
+
+    return false, "Return packager did not pull items from output barrel"
 end
 
 local function registerWithServer()
@@ -129,7 +170,7 @@ local function executeProcess(msg)
     if not ok then return false, err end
 
     print("  Sending completed package home...")
-    ok, err = sendOutputHome()
+    ok, err = sendOutputHome(outputName, expected)
     if not ok then return false, err end
 
     print(("  Done: %s x%d"):format(outputName, expected))

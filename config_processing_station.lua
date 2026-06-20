@@ -25,4 +25,12 @@ cfg.home_address         = "home frogport"
 -- Seconds to wait for the processing machine to finish a request.
 cfg.process_timeout = 300
 
+-- Delay after the exact output count appears before firing the Packager.
+-- Increase this if the machine/barrel/packager setup needs more time to settle.
+cfg.package_settle_delay = 1
+
+-- Retry makePackage if the output barrel did not drain.
+cfg.package_attempts = 3
+cfg.package_drain_timeout = 10
+
 return cfg
