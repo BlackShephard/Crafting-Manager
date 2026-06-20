@@ -21,9 +21,8 @@ cfg.input_barrel = "minecraft:barrel_0"
 -- All saw outputs must be physically collected into this barrel.
 cfg.output_barrel = "minecraft:barrel_1"
 
--- Allowed saw byproducts are moved here before the return packager fires,
--- so the package sent home contains only the requested output item.
-cfg.byproduct_barrel = "minecraft:barrel_2"
+-- Allowed saw byproducts may be returned home in the same package
+-- as the requested output. Other unexpected items still fail the job.
 cfg.byproduct_items = {
     ["farmersdelight:tree_bark"] = true,
 }

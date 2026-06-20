@@ -18,7 +18,6 @@ local PROTO = cfg.protocol or "CRAFT_NET"
 
 local inputBarrel  = nil
 local outputBarrel = nil
-local byproductBarrel = nil
 local retPackager  = nil
 
 local function findWirelessModem()
@@ -41,13 +40,6 @@ local function boot()
     assert(outputBarrel,
         "Output barrel not found (cfg.output_barrel = "
         .. tostring(cfg.output_barrel) .. ")")
-
-    if cfg.byproduct_barrel then
-        byproductBarrel = peripheral.wrap(cfg.byproduct_barrel)
-        assert(byproductBarrel,
-            "Byproduct barrel not found (cfg.byproduct_barrel = "
-            .. tostring(cfg.byproduct_barrel) .. ")")
-    end
 
     retPackager = peripheral.wrap(cfg.return_packager_name)
     assert(retPackager,
@@ -120,35 +112,24 @@ local function isAllowedByproduct(name)
     return false
 end
 
-local function clearByproducts(outputName)
-    local movedAny = {}
+local function validateByproducts(outputName)
+    local byproducts = {}
 
-    for slot, stack in pairs(outputBarrel.list()) do
+    for _, stack in pairs(outputBarrel.list()) do
         if stack.name ~= outputName then
             if not isAllowedByproduct(stack.name) then
                 return false, "Unexpected item in output barrel: "
                     .. stack.name .. " x" .. stack.count
             end
-            if not byproductBarrel then
-                return false, "Byproduct barrel required for "
-                    .. stack.name .. " x" .. stack.count
-            end
 
-            local moved = outputBarrel.pushItems(
-                cfg.byproduct_barrel, slot, stack.count)
-            if moved < stack.count then
-                return false, ("Could not move byproduct %s (%d/%d moved)"):format(
-                    stack.name, moved, stack.count)
-            end
-
-            movedAny[#movedAny + 1] = {
+            byproducts[#byproducts + 1] = {
                 name = stack.name,
                 count = stack.count,
             }
         end
     end
 
-    return true, movedAny
+    return true, byproducts
 end
 
 local function buildNeeded(msg)
@@ -264,7 +245,7 @@ local function waitForExactOutput(outputName, expected, timeout)
     local deadline = os.epoch("utc") + timeout * 1000
 
     while os.epoch("utc") < deadline do
-        local ok, err = clearByproducts(outputName)
+        local ok, err = validateByproducts(outputName)
         if not ok then return false, err end
 
         local have = countOutput(outputName)
@@ -286,7 +267,7 @@ local function waitForBarrelDrained(outputName, timeout)
     local deadline = os.epoch("utc") + timeout * 1000
 
     while os.epoch("utc") < deadline do
-        local ok, err = clearByproducts(outputName)
+        local ok, err = validateByproducts(outputName)
         if not ok then return false, err end
 
         local have = countOutput(outputName)
@@ -307,7 +288,7 @@ local function sendOutputHome(outputName, expected)
     for attempt = 1, attempts do
         os.sleep(settleDelay)
 
-        local ok, err = clearByproducts(outputName)
+        local ok, err = validateByproducts(outputName)
         if not ok then return false, err end
 
         local have = countOutput(outputName)
