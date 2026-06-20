@@ -212,25 +212,23 @@ local function calibrateSableOffset(currentPos)
     sleep(1.0)
 end
 
-local function calcEffectiveBarrels(chargeSlots)
+local function calcEffectiveBarrels(chargeEq)
     if CANNON.manual_effective_barrels then
         return CANNON.manual_effective_barrels, "manual"
     end
-    local freeChambers = math.max(0, CANNON.chambers - chargeSlots)
+    local freeChambers = math.max(0, CANNON.chambers - chargeEq)
     return CANNON.barrels + freeChambers, "auto"
 end
 
-local function calcMuzzleVelocity(chargeEq, barrelBlocks, projMass, velMult, chargeSlots)
-    -- chargeSlots: physical chamber slots used (determines charge column length c).
-    -- chargeEq:    total chemical equivalents (determines propellant energy p).
-    -- If chargeSlots omitted, falls back to chargeEq (standard charges).
-    local slots = chargeSlots or chargeEq
-    if barrelBlocks <= slots then
-        return nil, string.format("barrel too short (need > %g slots)", slots)
+local function calcMuzzleVelocity(chargeEq, barrelBlocks, projMass, velMult)
+    -- chargeEq drives both propellant energy (p) and column length (c).
+    -- This matches how the CBC mod applies Robins' formula internally.
+    if barrelBlocks <= chargeEq then
+        return nil, string.format("barrel too short (need > %.2f)", chargeEq)
     end
     local p  = chargeEq * POWDER_MASS
     local L  = barrelBlocks * CHARGE_LENGTH
-    local c  = slots * CHARGE_LENGTH
+    local c  = chargeEq * CHARGE_LENGTH
     local v2 = (p / (projMass + p / 3)) * math.log(L / c)
     if v2 <= 0 then return nil, "invalid interior-ballistics inputs" end
     return ROBINS_K * (velMult or 1.0) * math.sqrt(v2), nil
@@ -370,19 +368,18 @@ local function chooseChargeLoad()
     local idx = math.floor(clamp(readNumber("Type [1=Standard]: ", 1), 1, #CHARGE_TYPES))
     local ct = CHARGE_TYPES[idx]
 
-    local slots = math.floor(readNumber("Charge slots loaded (physical chambers used): ", 1))
+    local slots = math.floor(readNumber("Number of charges loaded: ", 1))
 
     local equivPerSlot
     if ct.equiv_per_slot then
         equivPerSlot = ct.equiv_per_slot
     else
-        equivPerSlot = readNumber("Charge equivalents per slot: ", 1.0)
+        equivPerSlot = readNumber("Charge equivalents per charge: ", 1.0)
     end
 
-    local chargeEq   = slots * equivPerSlot
-    local chargeSlots = slots
-    print(string.format("  -> %d slot(s) x %.2f eq = %.3f total equiv", slots, equivPerSlot, chargeEq))
-    return chargeSlots, chargeEq
+    local chargeEq = slots * equivPerSlot
+    print(string.format("  -> %d x %.2f eq = %.3f total equiv", slots, equivPerSlot, chargeEq))
+    return chargeEq
 end
 
 local function chooseMuzzleVelocity()
@@ -404,11 +401,11 @@ local function chooseMuzzleVelocity()
     end
 
     local projMass, projName = chooseProjectileMass()
-    local chargeSlots, chargeEq = chooseChargeLoad()
-    local eff, effMode = calcEffectiveBarrels(chargeSlots)
+    local chargeEq = chooseChargeLoad()
+    local eff, effMode = calcEffectiveBarrels(chargeEq)
 
     print(string.format("Cannon config: barrels=%s chambers=%s", tostring(CANNON.barrels), tostring(CANNON.chambers)))
-    print(string.format("Effective barrels (%s): %.2f  (charge col length: %d slot(s))", effMode, eff, chargeSlots))
+    print(string.format("Effective barrels (%s): %.2f", effMode, eff))
 
     write(string.format("Override effective barrels [%.2f]: ", eff))
     local s = read()
@@ -417,14 +414,13 @@ local function chooseMuzzleVelocity()
         local n = tonumber(s)
         if n then barrelBlocks = n end
     end
-    while barrelBlocks <= chargeSlots do
-        print(string.format("Need effective barrels > %d (charge slots)", chargeSlots))
+    while barrelBlocks <= chargeEq do
+        print(string.format("Need effective barrels > %.2f", chargeEq))
         barrelBlocks = readNumber("Effective barrels: ", eff)
     end
 
     local velMult = readNumber("Velocity multiplier [1.0]: ", 1.0)
-    -- Pass chargeSlots as the column length, chargeEq as the energy.
-    local v0, err = calcMuzzleVelocity(chargeEq, barrelBlocks, projMass, velMult, chargeSlots)
+    local v0, err = calcMuzzleVelocity(chargeEq, barrelBlocks, projMass, velMult)
     if not v0 then
         print("Robins error: " .. tostring(err))
         local v0f = readNumber("Enter velocity manually (m/s): ", 180)
@@ -445,7 +441,6 @@ local function chooseMuzzleVelocity()
         projectileName = projName,
         projectileMass = projMass,
         chargeEq = chargeEq,
-        chargeSlots = chargeSlots,
         effectiveBarrels = barrelBlocks,
         velMult = velMult,
     }
@@ -482,8 +477,7 @@ local function quickChangeProjectile(speedCfg)
         speedCfg.chargeEq,
         speedCfg.effectiveBarrels,
         newMass,
-        speedCfg.velMult,
-        speedCfg.chargeSlots
+        speedCfg.velMult
     )
     if not v0 then
         print("Recompute error: " .. tostring(err))
