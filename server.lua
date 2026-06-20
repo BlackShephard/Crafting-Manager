@@ -331,50 +331,41 @@ local function requestItems(recipe, qty)
     return true
 end
 
--- Send raw materials to a processing machine (press, mixer, etc.).
--- The machine transforms them and routes output back to vault via Create
--- logistics -- no CC station handshake or busy-tracking needed.
-local function dispatchProcess(rec, qty)
-    -- Temporarily redirect the packager to the processing station address
-    local savedAddr = cfg.station_address
-    cfg.station_address = rec.station
-    local ok, err = requestItems(rec, qty)
-    cfg.station_address = savedAddr
-    if not ok then
-        ui.status = "ERROR (process): " .. err
-        return false
-    end
-    local typeLabel = (rec.type or "process"):upper()
-    ui.status = ("[%s] Sent: %s x%d -> %s"):format(
-        typeLabel, rec.name, qty * (rec.output_count or 1), rec.station)
-    return true
-end
-
 -- Network state
 
--- stations[name] = { id = computerID, busy = false }
+-- stations[name] = { id = computerID, busy = false, stationType = "crafting"|"processing" }
 local stations = {}
 -- pending[reqID] = { recipe, qty, sid, stationName }
 local pending  = {}
 local nextID   = 1
 local queue    = {}   -- { rec, qty }
 
-local function findFreeStation(preferredName)
+local function stationMatches(st, stationType)
+    if not stationType then return true end
+    return (st.stationType or "crafting") == stationType
+end
+
+local function findFreeStation(preferredName, stationType)
     if preferredName and stations[preferredName]
-            and not stations[preferredName].busy then
+            and not stations[preferredName].busy
+            and stationMatches(stations[preferredName], stationType) then
         return preferredName, stations[preferredName].id
     end
     for name, st in pairs(stations) do
-        if not st.busy then return name, st.id end
+        if not st.busy and stationMatches(st, stationType) then
+            return name, st.id
+        end
     end
     return nil, nil
 end
 
-local function countStations()
+local function countStations(stationType)
     local total, free = 0, 0
     for _, st in pairs(stations) do
-        total = total + 1
-        if not st.busy then free = free + 1 end
+        if stationMatches(st, stationType) then
+            total = total + 1
+            if not st.busy then free = free + 1 end
+        end
     end
     return total, free
 end
@@ -406,10 +397,18 @@ local ui = {
 
 -- Dispatch (defined before touch handlers need it)
 
+local function dispatchToAddress(address, recipe, qty)
+    local savedAddr = cfg.station_address
+    cfg.station_address = address
+    local ok, err = requestItems(recipe, qty)
+    cfg.station_address = savedAddr
+    return ok, err
+end
+
 local function dispatchCraft(rec, qty)
-    local stName, sid = findFreeStation(rec.station)
+    local stName, sid = findFreeStation(rec.station, "crafting")
     if not stName then
-        ui.status = "ERROR: no station online"
+        ui.status = "ERROR: no crafting station online"
         return false
     end
 
@@ -433,10 +432,49 @@ local function dispatchCraft(rec, qty)
         count  = qty,
     }, PROTO)
 
-    local _, freeN = countStations()
+    local _, freeN = countStations("crafting")
     local qStr = #queue > 0 and ("  Q:" .. #queue) or ""
     ui.status = ("Sent: %s x%d -> %s  (%d free%s)"):format(
         rec.name, qty, stName, freeN, qStr)
+    return true
+end
+
+-- Processing stations receive the ingredient package through Create logistics,
+-- then send output home only after the requested item count is complete.
+local function dispatchProcess(rec, qty)
+    local stName, sid = findFreeStation(rec.station, "processing")
+    if not stName then
+        ui.status = "ERROR: processing station offline: " .. tostring(rec.station)
+        return false
+    end
+
+    stations[stName].busy = true
+
+    local ok, err = dispatchToAddress(rec.station, rec, qty)
+    if not ok then
+        stations[stName].busy = false
+        ui.status = "ERROR (process): " .. err
+        return false
+    end
+
+    local id = nextID
+    nextID = nextID + 1
+    pending[id] = { recipe = rec, qty = qty, sid = sid, stationName = stName }
+
+    local expected = qty * math.max(1, rec.output_count or 1)
+    rednet.send(sid, {
+        type   = "PROCESS_REQUEST",
+        id     = id,
+        recipe = rec.id,
+        output = rec.output,
+        count  = expected,
+    }, PROTO)
+
+    local typeLabel = (rec.type or "process"):upper()
+    local _, freeN = countStations("processing")
+    local qStr = #queue > 0 and ("  Q:" .. #queue) or ""
+    ui.status = ("[%s] Sent: %s x%d -> %s  (%d free%s)"):format(
+        typeLabel, rec.name, expected, stName, freeN, qStr)
     return true
 end
 
@@ -457,16 +495,20 @@ local function tryDispatchNext()
             or job.rec.type == "fan_haunt"
             or job.rec.type == "fan_cool"
             or job.rec.type == "process" then
-            -- Processing job: no CC station needed, dispatch directly
-            table.remove(queue, i)
-            if ui.queueSel >= i then
-                ui.queueSel = math.max(0, ui.queueSel - 1)
+            -- Processing job: needs its matching processing station controller.
+            if not findFreeStation(job.rec.station, "processing") then
+                i = i + 1
+            else
+                table.remove(queue, i)
+                if ui.queueSel >= i then
+                    ui.queueSel = math.max(0, ui.queueSel - 1)
+                end
+                dispatchProcess(job.rec, job.qty)
+                -- i unchanged; re-check same position (now holds next job)
             end
-            dispatchProcess(job.rec, job.qty)
-            -- i unchanged; re-check same position (now holds next job)
         else
             -- Mechanical crafter job: needs a free CC station
-            local stName = findFreeStation()
+            local stName = findFreeStation(nil, "crafting")
             if not stName then
                 i = i + 1  -- no station free; skip for now
             else
@@ -939,7 +981,7 @@ local function drawCraftTab(W, H)
         local btnY   = H - 2
         local canAll = canCraft(rec, ui.qty)
         local cm     = maxCraftable(rec)
-        local tot, freeN = countStations()
+        local tot, freeN = countStations("crafting")
         -- Green=full OK, Orange=partial possible, Gray=none/no stations
         local btnColor = canAll   and C.btn
                       or (cm > 0  and C.warn or colors.gray)
@@ -955,7 +997,7 @@ local function drawCraftTab(W, H)
         -- Hint line (H-3)
         mfill(recX, H - 3, recW, " ", C.dim, C.bg)
         if tot == 0 then
-            mw(recX, H - 3, trunc(" No stations online", recW), C.bad, C.bg)
+            mw(recX, H - 3, trunc(" No crafting stations online", recW), C.bad, C.bg)
         elseif not canAll and cm > 0 then
             mw(recX, H - 3,
                trunc((" ! Can only make %d of %d -- tap CRAFT for details"):format(cm, ui.qty), recW),
@@ -1139,7 +1181,7 @@ local function handleCraftTouch(x, y, W, H)
             local c = ui.confirm
             if c.canMake > 0 and x < W - 9 then
                 ui.confirm = nil
-                local _, freeN = countStations()
+                local _, freeN = countStations("crafting")
                 if freeN > 0 then
                     dispatchCraft(c.rec, c.canMake)
                 else
@@ -1296,7 +1338,7 @@ local function handleCraftTouch(x, y, W, H)
                 local canMake = maxCraftable(rec)
                 if canMake >= ui.qty then
                     -- Full order: have everything right now
-                    local _, freeN = countStations()
+                    local _, freeN = countStations("crafting")
                     if freeN > 0 then
                         dispatchCraft(rec, ui.qty)
                     else
@@ -1435,10 +1477,16 @@ local function handleMsg(sid, msg)
     if msg.type == "HELLO" then
         local wasBusy = stations[msg.station_name]
                         and stations[msg.station_name].busy or false
-        stations[msg.station_name] = { id = sid, busy = wasBusy }
+        stations[msg.station_name] = {
+            id = sid,
+            busy = wasBusy,
+            stationType = msg.station_type or "crafting",
+        }
         rednet.send(sid, { type = "ACK" }, PROTO)
-        ui.status = "Station '" .. tostring(msg.station_name)
-                    .. "' registered (ID:" .. sid .. ")"
+        ui.status = ("%s station '%s' registered (ID:%d)"):format(
+            stations[msg.station_name].stationType,
+            tostring(msg.station_name),
+            sid)
         tryDispatchNext()
 
     elseif msg.type == "DONE" then

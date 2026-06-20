@@ -6,9 +6,9 @@
 --   When compound crafting needs one of these items, the server pushes
 --   the raw ingredients into a package addressed to `station`.
 --   The Create logistics system routes the package to the processing
---   machine, which transforms it and sends the output back to the
---   home vault automatically.  No CC computer is needed at the
---   processing end -- the machine runs unattended.
+--   machine.  A processing station computer watches that machine's
+--   output barrel and only fires the return Packager when the exact
+--   requested output count is ready.
 --
 -- Fields:
 --   id           unique recipe identifier (string)
@@ -16,8 +16,8 @@
 --   type         machine type: "press" | "mix" | "saw" | "fan_wash" | ...
 --                (used for the [PRESS] / [MIX] label in the UI)
 --   station      Create frogport/packager address the package is
---                sent to (must match the label on the receiving
---                packager at the processing machine)
+--                sent to. Also must match cfg.station_name on that
+--                machine's processing_station.lua computer.
 --   output       item id this recipe produces
 --   output_count how many output items are produced per craft
 --   ingredients  list of { item=<item_id>, count=<number> }

@@ -23,10 +23,12 @@ base = base:gsub("/$", "")  -- strip trailing slash
 local files = {
     "server.lua",
     "station.lua",
+    "processing_station.lua",
     "recipes.lua",
     "processing.lua",
     "config_server.lua",
     "config_station.lua",
+    "config_processing_station.lua",
 }
 
 print("Installing from: " .. base)
@@ -59,4 +61,6 @@ if fail == 0 then
     print("                         run server.lua")
     print("  Station computer (ID 6): rename config_station.lua -> config.lua")
     print("                           run station.lua")
+    print("  Processing station:      rename config_processing_station.lua -> config.lua")
+    print("                           run processing_station.lua")
 end
