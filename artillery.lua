@@ -16,7 +16,7 @@ local CONFIG = {
     -- Command mode for cannon mount yaw:
     -- "world"         -> setTargetAngles(yaw_world, pitch)
     -- "ship_relative" -> setTargetAngles(yaw_world - heading + auto_yaw_offset, pitch)
-    yaw_command_mode = "world",
+    yaw_command_mode = "ship_relative",
     auto_yaw_offset = 270,
 
     yaw_offset_deg = 0,
