@@ -375,8 +375,8 @@ def main():
                     help="Only scan JARs whose filename contains this string")
     ap.add_argument("--all-mods", action="store_true",
                     help="Scan ALL JARs (not just create* ones)")
-    ap.add_argument("--station", default="cogwheel_station",
-                    help="Station name assigned to every recipe (default: cogwheel_station)")
+    ap.add_argument("--station", default="Crafting_Station_1",
+                    help="Station name assigned to every recipe (default: Crafting_Station_1)")
     ap.add_argument("--out", default=None,
                     help="Output path (default: recipes_generated.lua beside this script)")
     args = ap.parse_args()
