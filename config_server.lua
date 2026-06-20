@@ -18,4 +18,9 @@ cfg.station_address      = "Crafting_Station_1"
 cfg.monitor_name         = "monitor_1"
 cfg.stock_ticker_name    = "Create_StockTicker_0"
 
+-- After a station reports DONE, wait briefly for the return package to
+-- actually arrive in the vault before advancing dependent queue steps.
+cfg.return_arrival_timeout = 20
+cfg.return_arrival_scan_interval = 0.5
+
 return cfg

@@ -649,6 +649,8 @@ local function dispatchCraft(rec, qty)
     end
 
     stations[stName].busy = true
+    local startStock = stockOf(rec.output)
+    local expectedOutput = qty * math.max(1, rec.output_count or 1)
 
     local st = stations[stName]
     local address = (st and st.address) or stName
@@ -661,7 +663,14 @@ local function dispatchCraft(rec, qty)
 
     local id = nextID
     nextID   = nextID + 1
-    pending[id] = { recipe = rec, qty = qty, sid = sid, stationName = stName }
+    pending[id] = {
+        recipe = rec,
+        qty = qty,
+        sid = sid,
+        stationName = stName,
+        startStock = startStock,
+        expectedOutput = expectedOutput,
+    }
 
     rednet.send(sid, {
         type   = "REQUEST",
@@ -687,6 +696,8 @@ local function dispatchProcess(rec, qty)
     end
 
     stations[stName].busy = true
+    local startStock = stockOf(rec.output)
+    local expected = qty * math.max(1, rec.output_count or 1)
 
     local ok, err = dispatchToAddress(rec.station, rec, qty)
     if not ok then
@@ -697,9 +708,14 @@ local function dispatchProcess(rec, qty)
 
     local id = nextID
     nextID = nextID + 1
-    pending[id] = { recipe = rec, qty = qty, sid = sid, stationName = stName }
-
-    local expected = qty * math.max(1, rec.output_count or 1)
+    pending[id] = {
+        recipe = rec,
+        qty = qty,
+        sid = sid,
+        stationName = stName,
+        startStock = startStock,
+        expectedOutput = expected,
+    }
     rednet.send(sid, {
         type         = "PROCESS_REQUEST",
         id           = id,
@@ -950,6 +966,28 @@ buildCraftPlan = function(itemName, qty, plan, projected, depth)
 
     plan[#plan + 1] = { rec = rec, qty = crafts }
     return plan
+end
+
+local function waitForVaultReturn(job)
+    local timeout = cfg.return_arrival_timeout or 20
+    local interval = cfg.return_arrival_scan_interval or 0.5
+    local target = (job.startStock or 0) + (job.expectedOutput or 0)
+    if not job.recipe or not job.recipe.output or target <= 0 then
+        scanVault()
+        return true
+    end
+
+    local deadline = os.epoch("utc") + timeout * 1000
+    while os.epoch("utc") < deadline do
+        scanVault()
+        if stockOf(job.recipe.output) >= target then
+            return true
+        end
+        os.sleep(interval)
+    end
+
+    scanVault()
+    return stockOf(job.recipe.output) >= target
 end
 
 -- Drawing helpers
@@ -1785,11 +1823,16 @@ local function handleMsg(sid, msg)
             if stations[job.stationName] then
                 stations[job.stationName].busy = false
             end
-            scanVault()
+            local arrived = waitForVaultReturn(job)
             local qStr = #queue > 0
                 and ("  [%d queued]"):format(#queue) or ""
-            ui.status = ("Done: %s x%d via %s -- vault updated%s"):format(
-                job.recipe.name, job.qty, job.stationName, qStr)
+            if arrived then
+                ui.status = ("Done: %s x%d via %s -- vault updated%s"):format(
+                    job.recipe.name, job.qty, job.stationName, qStr)
+            else
+                ui.status = ("Done: %s x%d via %s -- waiting for vault%s"):format(
+                    job.recipe.name, job.qty, job.stationName, qStr)
+            end
             tryDispatchNext()
             checkMinStock()
         end
