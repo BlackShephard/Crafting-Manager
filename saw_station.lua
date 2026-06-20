@@ -18,6 +18,7 @@ local PROTO = cfg.protocol or "CRAFT_NET"
 
 local inputBarrel  = nil
 local outputBarrel = nil
+local byproductBarrel = nil
 local retPackager  = nil
 
 local function findWirelessModem()
@@ -40,6 +41,13 @@ local function boot()
     assert(outputBarrel,
         "Output barrel not found (cfg.output_barrel = "
         .. tostring(cfg.output_barrel) .. ")")
+
+    if cfg.byproduct_barrel then
+        byproductBarrel = peripheral.wrap(cfg.byproduct_barrel)
+        assert(byproductBarrel,
+            "Byproduct barrel not found (cfg.byproduct_barrel = "
+            .. tostring(cfg.byproduct_barrel) .. ")")
+    end
 
     retPackager = peripheral.wrap(cfg.return_packager_name)
     assert(retPackager,
@@ -92,6 +100,55 @@ local function describeOther(other)
     if #other == 0 then return nil end
     local first = other[1]
     return ("%s x%d"):format(first.name, first.count)
+end
+
+local DEFAULT_BYPRODUCT_PATTERNS = {
+    "^farmersdelight:.*bark$",
+}
+
+local function isAllowedByproduct(name)
+    if type(name) ~= "string" then return false end
+
+    local items = cfg.byproduct_items or {}
+    if items[name] then return true end
+
+    local patterns = cfg.byproduct_patterns or DEFAULT_BYPRODUCT_PATTERNS
+    for _, pattern in ipairs(patterns) do
+        if name:match(pattern) then return true end
+    end
+
+    return false
+end
+
+local function clearByproducts(outputName)
+    local movedAny = {}
+
+    for slot, stack in pairs(outputBarrel.list()) do
+        if stack.name ~= outputName then
+            if not isAllowedByproduct(stack.name) then
+                return false, "Unexpected item in output barrel: "
+                    .. stack.name .. " x" .. stack.count
+            end
+            if not byproductBarrel then
+                return false, "Byproduct barrel required for "
+                    .. stack.name .. " x" .. stack.count
+            end
+
+            local moved = outputBarrel.pushItems(
+                cfg.byproduct_barrel, slot, stack.count)
+            if moved < stack.count then
+                return false, ("Could not move byproduct %s (%d/%d moved)"):format(
+                    stack.name, moved, stack.count)
+            end
+
+            movedAny[#movedAny + 1] = {
+                name = stack.name,
+                count = stack.count,
+            }
+        end
+    end
+
+    return true, movedAny
 end
 
 local function buildNeeded(msg)
@@ -151,7 +208,9 @@ local function routeFor(msg)
 
     if item:match("_hanging_sign$") then return nil, "hanging signs are not saw-routed" end
     if item:match("^stripped_.+_log$") then return "stripped_log" end
+    if item:match("^stripped_.+_stem$") then return "stripped_log" end
     if item:match("^stripped_.+_wood$") then return "stripped_wood" end
+    if item:match("^stripped_.+_hyphae$") then return "stripped_wood" end
     if item:match("_pressure_plate$") then return "pressure_plate" end
     if item:match("_fence_gate$") then return "fence_gate" end
     if item:match("_trapdoor$") then return "trapdoor" end
@@ -205,10 +264,10 @@ local function waitForExactOutput(outputName, expected, timeout)
     local deadline = os.epoch("utc") + timeout * 1000
 
     while os.epoch("utc") < deadline do
-        local have, other = countOutput(outputName)
-        if #other > 0 then
-            return false, "Unexpected item in output barrel: " .. describeOther(other)
-        end
+        local ok, err = clearByproducts(outputName)
+        if not ok then return false, err end
+
+        local have = countOutput(outputName)
         if have == expected then return true end
         if have > expected then
             return false, ("Output over target: %s has %d, expected %d"):format(
@@ -227,10 +286,10 @@ local function waitForBarrelDrained(outputName, timeout)
     local deadline = os.epoch("utc") + timeout * 1000
 
     while os.epoch("utc") < deadline do
-        local have, other = countOutput(outputName)
-        if #other > 0 then
-            return false, "Unexpected item in output barrel: " .. describeOther(other)
-        end
+        local ok, err = clearByproducts(outputName)
+        if not ok then return false, err end
+
+        local have = countOutput(outputName)
         if have == 0 then return true end
         os.sleep(0.5)
     end
@@ -248,16 +307,16 @@ local function sendOutputHome(outputName, expected)
     for attempt = 1, attempts do
         os.sleep(settleDelay)
 
-        local have, other = countOutput(outputName)
-        if #other > 0 then
-            return false, "Unexpected item in output barrel: " .. describeOther(other)
-        end
+        local ok, err = clearByproducts(outputName)
+        if not ok then return false, err end
+
+        local have = countOutput(outputName)
         if have ~= expected then
             return false, ("Output changed before packaging: %s has %d, expected %d"):format(
                 outputName, have, expected)
         end
 
-        local ok, err = pcall(retPackager.makePackage)
+        ok, err = pcall(retPackager.makePackage)
         if not ok then
             return false, "makePackage failed: " .. tostring(err)
         end

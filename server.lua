@@ -318,7 +318,9 @@ local function inferSawRoute(output)
 
     if item:match("_hanging_sign$") then return nil end
     if item:match("^stripped_.+_log$") then return "stripped_log" end
+    if item:match("^stripped_.+_stem$") then return "stripped_log" end
     if item:match("^stripped_.+_wood$") then return "stripped_wood" end
+    if item:match("^stripped_.+_hyphae$") then return "stripped_wood" end
     if item:match("_pressure_plate$") then return "pressure_plate" end
     if item:match("_fence_gate$") then return "fence_gate" end
     if item:match("_trapdoor$") then return "trapdoor" end
@@ -355,8 +357,8 @@ local function plankInputForRecipe(rec)
 end
 
 local LOG_SOURCE_OVERRIDES = {
-    ["minecraft:crimson_planks"] = "minecraft:crimson_stem",
-    ["minecraft:warped_planks"]  = "minecraft:warped_stem",
+    ["minecraft:crimson_planks"] = "minecraft:stripped_crimson_stem",
+    ["minecraft:warped_planks"]  = "minecraft:stripped_warped_stem",
     ["minecraft:bamboo_planks"]  = "minecraft:bamboo_block",
 }
 
@@ -374,7 +376,7 @@ local function logSourceForPlanks(planks)
     if not ns or not path then return nil end
     local base = path:match("^(.*)_planks$")
     if not base then return nil end
-    return ns .. ":" .. base .. "_log"
+    return ns .. ":stripped_" .. base .. "_log"
 end
 
 local function collectKnownPlanks()
@@ -394,6 +396,12 @@ local function collectKnownPlanks()
     return out
 end
 
+local function rawSourceForStripped(source)
+    local ns, path = tostring(source):match("^([^:]+):stripped_(.+)$")
+    if not ns or not path then return nil end
+    return ns .. ":" .. path
+end
+
 local function addGeneratedSawRecipes()
     local existing = {}
     for _, r in ipairs(proc) do
@@ -404,6 +412,23 @@ local function addGeneratedSawRecipes()
         local outKey = itemKey(planks)
         local source = logSourceForPlanks(planks)
         if source and not existing[outKey] and not isInvalidItem(source) then
+            local rawSource = rawSourceForStripped(source)
+            local sourceKey = itemKey(source)
+            if rawSource and not existing[sourceKey] and not isInvalidItem(rawSource) then
+                proc[#proc + 1] = {
+                    id           = "saw_" .. safeId(source),
+                    name         = titleFromItem(source),
+                    type         = "saw",
+                    station      = "saw_station",
+                    output       = source,
+                    output_count = 1,
+                    ingredients  = { { item = rawSource, count = 1 } },
+                    route        = inferSawRoute(source),
+                    generated    = true,
+                }
+                existing[sourceKey] = true
+            end
+
             proc[#proc + 1] = {
                 id           = "saw_" .. safeId(planks),
                 name         = titleFromItem(planks),
