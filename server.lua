@@ -672,13 +672,14 @@ end
 
 -- Compound crafting helpers
 
--- Find the first recipe (crafter or processing) that outputs itemName
+-- Find the first recipe that outputs itemName. Processing recipes are preferred
+-- because they encode explicit station routing for things like sheets and saw cuts.
 local function findRecipeFor(itemName)
     local key = itemKey(itemName)
-    for _, r in ipairs(recipes) do
+    for _, r in ipairs(proc) do
         if itemKey(r.output) == key then return r end
     end
-    for _, r in ipairs(proc) do
+    for _, r in ipairs(recipes) do
         if itemKey(r.output) == key then return r end
     end
     return nil
