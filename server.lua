@@ -285,6 +285,79 @@ local function isPlankItem(name)
         and (key:sub(-7) == "_planks" or key:sub(-6) == "planks")
 end
 
+local function inferSawRoute(output)
+    if type(output) ~= "string" then return nil end
+    local item = output:match("^[^:]+:(.+)$") or output
+
+    if item:match("_hanging_sign$") then return nil end
+    if item:match("^stripped_.+_log$") then return "stripped_log" end
+    if item:match("^stripped_.+_wood$") then return "stripped_wood" end
+    if item:match("_pressure_plate$") then return "pressure_plate" end
+    if item:match("_fence_gate$") then return "fence_gate" end
+    if item:match("_trapdoor$") then return "trapdoor" end
+    if item:match("_stairs$") then return "stair" end
+    if item:match("_button$") then return "button" end
+    if item:match("_planks$") then return "plank" end
+    if item:match("_slab$") then return "slab" end
+    if item:match("_sign$") then return "sign" end
+    if item:match("_fence$") then return "fence" end
+    if item:match("_door$") then return "door" end
+    if item:match("_wood$") then return "wood" end
+
+    return nil
+end
+
+local function safeId(name)
+    return tostring(name):gsub("[^%w_]+", "_")
+end
+
+local function plankInputForRecipe(rec)
+    if type(rec) ~= "table" or type(rec.ingredients) ~= "table" then return nil end
+    local plank, count = nil, 0
+
+    for _, ing in ipairs(rec.ingredients) do
+        if isPlankItem(ing.item) then
+            if plank and itemKey(plank) ~= itemKey(ing.item) then return nil end
+            plank = ing.item
+            count = count + (ing.count or 1)
+        end
+    end
+
+    if plank and count > 0 then return plank, count end
+    return nil
+end
+
+local function addGeneratedSawRecipes()
+    local existing = {}
+    for _, r in ipairs(proc) do
+        existing[itemKey(r.output)] = true
+    end
+
+    for _, r in ipairs(recipes) do
+        local outKey = itemKey(r.output)
+        local route = inferSawRoute(r.output)
+        if route and not existing[outKey] then
+            local plank, count = plankInputForRecipe(r)
+            if plank then
+                proc[#proc + 1] = {
+                    id           = "saw_" .. safeId(r.output),
+                    name         = r.name,
+                    type         = "saw",
+                    station      = "saw_station",
+                    output       = r.output,
+                    output_count = r.output_count or 1,
+                    ingredients  = { { item = plank, count = count } },
+                    route        = route,
+                    generated    = true,
+                }
+                existing[outKey] = true
+            end
+        end
+    end
+end
+
+addGeneratedSawRecipes()
+
 local function stockOf(itemName)
     if isGenericPlanksTag(itemName) then
         local total = 0
@@ -536,6 +609,19 @@ end
 
 local buildCraftPlan
 
+local function isProcessingRecipe(rec)
+    return rec and (
+        rec.type == "press"
+        or rec.type == "mix"
+        or rec.type == "saw"
+        or rec.type == "deploy"
+        or rec.type == "fan_wash"
+        or rec.type == "fan_haunt"
+        or rec.type == "fan_cool"
+        or rec.type == "process"
+    )
+end
+
 local function tryDispatchNext()
     local i = 1
     while i <= #queue do
@@ -543,14 +629,7 @@ local function tryDispatchNext()
         if not canCraft(job.rec, job.qty) then
             -- Ingredients not ready yet; leave in queue
             i = i + 1
-        elseif job.rec.type == "press"
-            or job.rec.type == "mix"
-            or job.rec.type == "saw"
-            or job.rec.type == "deploy"
-            or job.rec.type == "fan_wash"
-            or job.rec.type == "fan_haunt"
-            or job.rec.type == "fan_cool"
-            or job.rec.type == "process" then
+        elseif isProcessingRecipe(job.rec) then
             -- Processing job: needs its matching processing station controller.
             if not findFreeStation(job.rec.station, "processing") then
                 i = i + 1
@@ -683,6 +762,11 @@ local function findRecipeFor(itemName)
         if itemKey(r.output) == key then return r end
     end
     return nil
+end
+
+local function preferredRecipeFor(rec)
+    if not rec or not rec.output then return rec end
+    return findRecipeFor(rec.output) or rec
 end
 
 -- Build an ordered list of {rec, qty} jobs needed to produce qty of itemName.
@@ -1381,7 +1465,7 @@ local function handleCraftTouch(x, y, W, H)
 
         -- CRAFT button row (H-2), visible in detail view only
         if ui.showDetail and y == H - 2 then
-            local rec = filteredRec[ui.recSel]
+            local rec = preferredRecipeFor(filteredRec[ui.recSel])
             if x <= recX + 2 then
                 -- [-]
                 ui.qty = math.max(1, ui.qty - 1)
@@ -1395,9 +1479,18 @@ local function handleCraftTouch(x, y, W, H)
                 local canMake = maxCraftable(rec)
                 if canMake >= ui.qty then
                     -- Full order: have everything right now
-                    local _, freeN = countStations("crafting")
-                    if freeN > 0 then
-                        dispatchCraft(rec, ui.qty)
+                    local free = nil
+                    if isProcessingRecipe(rec) then
+                        free = findFreeStation(rec.station, "processing")
+                    else
+                        free = findFreeStation(nil, "crafting")
+                    end
+                    if free then
+                        if isProcessingRecipe(rec) then
+                            dispatchProcess(rec, ui.qty)
+                        else
+                            dispatchCraft(rec, ui.qty)
+                        end
                     else
                         queue[#queue + 1] = { rec = rec, qty = ui.qty }
                         ui.status = ("Queued: %s x%d [%d waiting]"):format(
