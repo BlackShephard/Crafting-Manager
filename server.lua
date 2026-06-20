@@ -285,6 +285,33 @@ local function isPlankItem(name)
         and (key:sub(-7) == "_planks" or key:sub(-6) == "planks")
 end
 
+local function isInvalidItem(name)
+    if type(name) ~= "string" then return false end
+    local item = resolveItem(name)
+    if type(item) ~= "string" then return false end
+
+    -- Present in the generated recipe dump, but not in this modpack.
+    if item:match("^quark:.*blossom") then return true end
+
+    return false
+end
+
+local function isValidRecipe(rec)
+    if not rec or isInvalidItem(rec.output) then return false end
+    for _, ing in ipairs(rec.ingredients or {}) do
+        if isInvalidItem(ing.item) then return false end
+    end
+    return true
+end
+
+local function filterValidRecipes(list)
+    local out = {}
+    for _, rec in ipairs(list or {}) do
+        if isValidRecipe(rec) then out[#out + 1] = rec end
+    end
+    return out
+end
+
 local function inferSawRoute(output)
     if type(output) ~= "string" then return nil end
     local item = output:match("^[^:]+:(.+)$") or output
@@ -356,6 +383,8 @@ local function addGeneratedSawRecipes()
     end
 end
 
+recipes = filterValidRecipes(recipes)
+proc = filterValidRecipes(proc)
 addGeneratedSawRecipes()
 
 local function stockOf(itemName)
