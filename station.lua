@@ -105,6 +105,10 @@ local TAG_MAP = {
     ["c:crop/wheat"]            = "minecraft:wheat",
     ["c:crops/potato"]          = "minecraft:potato",
     ["c:dyes/pink"]             = "minecraft:pink_dye",
+    ["c:chests/wooden"]         = "minecraft:chest",
+    ["o:chests/wooden"]         = "minecraft:chest",
+    ["c:wooden_chests"]         = "minecraft:chest",
+    ["o:wooden_chests"]         = "minecraft:chest",
 }
 
 local function resolveItem(name)

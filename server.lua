@@ -183,6 +183,11 @@ local TAG_MAP = {
     ["o:glass"]                  = "minecraft:glass",
     ["c:glass_panes/colorless"]  = "minecraft:glass_pane",
     ["o:paneGlass"]              = "minecraft:glass_pane",
+    -- Storage
+    ["c:chests/wooden"]          = "minecraft:chest",
+    ["o:chests/wooden"]          = "minecraft:chest",
+    ["c:wooden_chests"]          = "minecraft:chest",
+    ["o:wooden_chests"]          = "minecraft:chest",
     -- Create-specific
     ["c:andesite_alloys"]        = "create:andesite_alloy",
     ["c:cogwheels"]              = "create:cogwheel",
