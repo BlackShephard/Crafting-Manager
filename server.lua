@@ -393,6 +393,9 @@ local function stationMatches(st, stationType)
 end
 
 local function findFreeStation(preferredName, stationType)
+    if stationType == "crafting" and preferredName == "Crafting_Station" then
+        preferredName = nil
+    end
     if preferredName and stations[preferredName]
             and not stations[preferredName].busy
             and stationMatches(stations[preferredName], stationType) then
