@@ -419,7 +419,7 @@ local function chooseMuzzleVelocity()
         barrelBlocks = readNumber("Effective barrels: ", eff)
     end
 
-    local velMult = readNumber("Velocity multiplier [1.0]: ", 1.0)
+    local velMult = readNumber("Velocity multiplier [1.05]: ", 1.05)
     local v0, err = calcMuzzleVelocity(chargeEq, barrelBlocks, projMass, velMult)
     if not v0 then
         print("Robins error: " .. tostring(err))
