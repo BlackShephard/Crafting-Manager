@@ -354,10 +354,69 @@ local function plankInputForRecipe(rec)
     return nil
 end
 
+local LOG_SOURCE_OVERRIDES = {
+    ["minecraft:crimson_planks"] = "minecraft:crimson_stem",
+    ["minecraft:warped_planks"]  = "minecraft:warped_stem",
+    ["minecraft:bamboo_planks"]  = "minecraft:bamboo_block",
+}
+
+local function titleFromItem(item)
+    local name = tostring(item):match("^[^:]+:(.+)$") or tostring(item)
+    name = name:gsub("_", " ")
+    return (name:gsub("(%a)([%w_']*)", function(first, rest)
+        return first:upper() .. rest
+    end))
+end
+
+local function logSourceForPlanks(planks)
+    if LOG_SOURCE_OVERRIDES[planks] then return LOG_SOURCE_OVERRIDES[planks] end
+    local ns, path = tostring(planks):match("^([^:]+):(.+)$")
+    if not ns or not path then return nil end
+    local base = path:match("^(.*)_planks$")
+    if not base then return nil end
+    return ns .. ":" .. base .. "_log"
+end
+
+local function collectKnownPlanks()
+    local seen, out = {}, {}
+    for _, r in ipairs(recipes) do
+        for _, ing in ipairs(r.ingredients or {}) do
+            if isPlankItem(ing.item) and not isInvalidItem(ing.item) then
+                local key = itemKey(ing.item)
+                if not seen[key] then
+                    seen[key] = true
+                    out[#out + 1] = ing.item
+                end
+            end
+        end
+    end
+    table.sort(out)
+    return out
+end
+
 local function addGeneratedSawRecipes()
     local existing = {}
     for _, r in ipairs(proc) do
         existing[itemKey(r.output)] = true
+    end
+
+    for _, planks in ipairs(collectKnownPlanks()) do
+        local outKey = itemKey(planks)
+        local source = logSourceForPlanks(planks)
+        if source and not existing[outKey] and not isInvalidItem(source) then
+            proc[#proc + 1] = {
+                id           = "saw_" .. safeId(planks),
+                name         = titleFromItem(planks),
+                type         = "saw",
+                station      = "saw_station",
+                output       = planks,
+                output_count = 6,
+                ingredients  = { { item = source, count = 1 } },
+                route        = "plank",
+                generated    = true,
+            }
+            existing[outKey] = true
+        end
     end
 
     for _, r in ipairs(recipes) do
@@ -720,16 +779,41 @@ end
 
 -- Recipe filtering
 
-local filteredRec = recipes
+local function buildAllRecipes()
+    local seen, out = {}, {}
+
+    for _, r in ipairs(proc) do
+        local key = itemKey(r.output)
+        if not seen[key] then
+            out[#out + 1] = r
+            seen[key] = true
+        end
+    end
+    for _, r in ipairs(recipes) do
+        local key = itemKey(r.output)
+        if not seen[key] then
+            out[#out + 1] = r
+            seen[key] = true
+        end
+    end
+
+    table.sort(out, function(a, b)
+        return tostring(a.name or a.output) < tostring(b.name or b.output)
+    end)
+    return out
+end
+
+local allRecipes = buildAllRecipes()
+local filteredRec = allRecipes
 
 local function buildFilteredRec(query)
     if not query or query == "" then
-        filteredRec = recipes
+        filteredRec = allRecipes
         return
     end
     local q = query:lower()
     local t = {}
-    for _, r in ipairs(recipes) do
+    for _, r in ipairs(allRecipes) do
         if r.name:lower():find(q, 1, true) then
             t[#t + 1] = r
         end
