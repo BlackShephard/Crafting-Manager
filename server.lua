@@ -461,7 +461,9 @@ local function dispatchCraft(rec, qty)
 
     stations[stName].busy = true
 
-    local ok, err = requestItems(rec, qty)
+    local st = stations[stName]
+    local address = (st and st.address) or stName
+    local ok, err = dispatchToAddress(address, rec, qty)
     if not ok then
         stations[stName].busy = false
         ui.status = "ERROR: " .. err
@@ -1532,6 +1534,7 @@ local function handleMsg(sid, msg)
             id = sid,
             busy = wasBusy,
             stationType = msg.station_type or "crafting",
+            address = msg.station_address or msg.station_name,
         }
         rednet.send(sid, { type = "ACK" }, PROTO)
         ui.status = ("%s station '%s' registered (ID:%d)"):format(

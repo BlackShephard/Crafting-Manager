@@ -395,7 +395,7 @@ end
 local function myRecipeIDs()
     local ids = {}
     for _, r in ipairs(recipes) do
-        if r.station == cfg.station_name then
+        if cfg.accept_all_recipes ~= false or r.station == cfg.station_name then
             ids[#ids + 1] = r.id
         end
     end
@@ -407,9 +407,10 @@ local function registerWithServer()
     print((("[%s] Broadcasting HELLO (%d recipes)"):format(
         cfg.station_name, #ids)))
     rednet.broadcast({
-        type         = "HELLO",
-        station_name = cfg.station_name,
-        recipes      = ids,
+        type            = "HELLO",
+        station_name    = cfg.station_name,
+        station_address = cfg.station_address or cfg.station_name,
+        recipes         = ids,
     }, PROTO)
 end
 

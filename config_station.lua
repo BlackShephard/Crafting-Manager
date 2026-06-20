@@ -16,7 +16,11 @@ local cfg = {}
 cfg.role                 = "station"
 cfg.protocol             = "CRAFT_NET"
 
-cfg.station_name         = "cogwheel_station"
+-- This must match the station's Frog Port address.
+-- Use Crafting_Station_1, Crafting_Station_2, etc. for additional stations.
+cfg.station_name         = "Crafting_Station_1"
+cfg.station_address      = cfg.station_name
+cfg.accept_all_recipes   = true
 cfg.server_id            = 7
 
 -- Staging barrel: Repackager must face THIS barrel directly.
