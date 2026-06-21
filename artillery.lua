@@ -48,10 +48,10 @@ local POWDER_MASS = 121.593455168150
 local CHARGE_LENGTH = 1.0
 
 local CANNON = {
-    -- Acceleration length is the open barrel path in front of the loaded shell.
-    -- Chambers affect loading/capacity but should not be added to muzzle velocity.
+    -- Effective length is the path in front of the shell:
+    -- barrel blocks plus any empty chamber blocks ahead of the loaded charges.
     barrels = 6,
-    chambers = 1,
+    chambers = 2,
     manual_effective_barrels = nil,
 }
 
@@ -246,11 +246,12 @@ local function calibrateSableOffset(currentPos)
     sleep(1.0)
 end
 
-local function calcEffectiveBarrels()
+local function calcEffectiveBarrels(chargeMeters)
     if CANNON.manual_effective_barrels then
         return CANNON.manual_effective_barrels, "manual"
     end
-    return CANNON.barrels, "auto"
+    local emptyChambersAhead = math.max(0, CANNON.chambers - chargeMeters)
+    return CANNON.barrels + emptyChambersAhead, "auto"
 end
 
 local function calcMuzzleVelocity(chargeEq, barrelBlocks, projMass, velMult)
@@ -411,8 +412,10 @@ local function chooseChargeLoad()
     end
 
     local chargeEq = slots * equivPerSlot
+    local chargeMeters = slots * CHARGE_LENGTH
     print(string.format("  -> %d x %.2f eq = %.3f total equiv", slots, equivPerSlot, chargeEq))
-    return chargeEq
+    print(string.format("  -> %.2f m loaded charge length", chargeMeters))
+    return chargeEq, chargeMeters
 end
 
 local function chooseMuzzleVelocity()
@@ -428,19 +431,20 @@ local function chooseMuzzleVelocity()
             projectileName = "manual",
             projectileMass = nil,
             chargeEq = nil,
+            chargeMeters = nil,
             mountedLength = nil,
             velMult = nil,
         }
     end
 
     local projMass, projName = chooseProjectileMass()
-    local chargeEq = chooseChargeLoad()
-    local eff, effMode = calcEffectiveBarrels()
+    local chargeEq, chargeMeters = chooseChargeLoad()
+    local eff, effMode = calcEffectiveBarrels(chargeMeters)
 
     print(string.format("Cannon config: barrels=%s chambers=%s", tostring(CANNON.barrels), tostring(CANNON.chambers)))
-    print(string.format("Barrel length (%s): %.2f m", effMode, eff))
+    print(string.format("Effective barrel length (%s): %.2f m", effMode, eff))
 
-    write(string.format("Override barrel length [%.2f m]: ", eff))
+    write(string.format("Override effective length [%.2f m]: ", eff))
     local s = read()
     local barrelBlocks = eff
     if s ~= "" then
@@ -448,8 +452,8 @@ local function chooseMuzzleVelocity()
         if n then barrelBlocks = n end
     end
     while barrelBlocks <= chargeEq do
-        print(string.format("Need barrel length > %.2f m", chargeEq))
-        barrelBlocks = readNumber("Barrel length: ", eff)
+        print(string.format("Need effective length > %.2f m", chargeEq))
+        barrelBlocks = readNumber("Effective length: ", eff)
     end
 
     local velMult = readNumber("Velocity multiplier [1.0]: ", 1.0)
@@ -462,6 +466,7 @@ local function chooseMuzzleVelocity()
             projectileName = projName,
             projectileMass = projMass,
             chargeEq = chargeEq,
+            chargeMeters = chargeMeters,
             mountedLength = barrelBlocks,
             velMult = velMult,
         }
@@ -474,6 +479,7 @@ local function chooseMuzzleVelocity()
         projectileName = projName,
         projectileMass = projMass,
         chargeEq = chargeEq,
+        chargeMeters = chargeMeters,
         mountedLength = barrelBlocks,
         velMult = velMult,
     }
