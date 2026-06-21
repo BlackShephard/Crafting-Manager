@@ -176,7 +176,10 @@ local function getSablePose()
     if not sublevel or type(sublevel.getLogicalPose) ~= "function" then
         return nil
     end
-    local p = sublevel.getLogicalPose()
+    local ok, p = pcall(sublevel.getLogicalPose)
+    if not ok then
+        return nil
+    end
     if not p or not p.position or not p.orientation then
         return nil
     end
@@ -188,6 +191,35 @@ local function getSablePose()
         ),
         heading = quatHeadingDegrees(p.orientation),
     }
+end
+
+local function vectorFromPositionTable(t)
+    if type(t) ~= "table" then return nil end
+    local x = t.x or t.X or t[1]
+    local y = t.y or t.Y or t[2]
+    local z = t.z or t.Z or t[3]
+    if type(x) ~= "number" or type(y) ~= "number" or type(z) ~= "number" then
+        return nil
+    end
+    return v(x, y, z)
+end
+
+local function getMountPosition(info)
+    if type(info) ~= "table" then return nil end
+    return vectorFromPositionTable(info.position)
+        or vectorFromPositionTable(info.pos)
+        or vectorFromPositionTable(info)
+end
+
+local function getMountInfo(mount)
+    if type(mount.getInfo) ~= "function" then
+        return {}
+    end
+    local ok, info = pcall(mount.getInfo)
+    if not ok or type(info) ~= "table" then
+        return {}
+    end
+    return info
 end
 
 local function calibrateSableOffset(currentPos)
@@ -536,15 +568,16 @@ local function main()
             local now = os.epoch("utc") / 1000
             local dt = math.max(1e-3, now - lastTime)
 
-            local info = mount.getInfo()
+            local info = getMountInfo(mount)
 
             local pose = getSablePose()
-            local source = "sable"
+            local source = "unknown"
             local shipHeading = nil
-            local shooterPos = lastGoodSablePos  -- hold last known until Sable updates
+            local shooterPos = nil
             local shooterVel = v(0, 0, 0)
 
             if pose then
+                source = "sable"
                 shipHeading = pose.heading
                 shooterPos = pose.pos
                 lastGoodSablePos = pose.pos
@@ -559,12 +592,20 @@ local function main()
                 end
                 lastShipPos = pose.pos
                 shooterVel = compensateMotion and velEst or v(0, 0, 0)
+            else
+                local mountPos = getMountPosition(info)
+                shooterPos = mountPos or lastGoodSablePos
+                if shooterPos then
+                    source = mountPos and "mount" or "last-sable"
+                end
+                lastShipPos = nil
+                velEst = v(0, 0, 0)
             end
 
             if not shooterPos then
-                -- Sable not yet available; wait.
                 term.clear(); term.setCursorPos(1,1)
-                print("Waiting for Sable position...")
+                print("Waiting for cannon position...")
+                print("No Sable ship pose and mount.getInfo() has no position.")
                 sleep(CONFIG.update_interval_s)
                 goto continue
             end
