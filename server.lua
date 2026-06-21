@@ -976,6 +976,28 @@ end
 -- Find the first recipe that outputs itemName. Processing recipes are preferred
 -- because they encode explicit station routing for things like sheets and saw cuts.
 local function findRecipeFor(itemName)
+    if isGenericPlanksTag(itemName) then
+        for _, r in ipairs(proc) do
+            if isPlankItem(r.output) and stockOf(r.output) > 0 then return r end
+        end
+        for _, r in ipairs(proc) do
+            if isPlankItem(r.output) then
+                local ing = r.ingredients and r.ingredients[1]
+                if ing and stockOf(ing.item) > 0 then return r end
+            end
+        end
+        for _, r in ipairs(proc) do
+            if isPlankItem(r.output) then
+                local ing = r.ingredients and r.ingredients[1]
+                local raw = ing and rawSourceForStripped(ing.item)
+                if raw and stockOf(raw) > 0 then return r end
+            end
+        end
+        for _, r in ipairs(proc) do
+            if isPlankItem(r.output) then return r end
+        end
+    end
+
     if isGenericStrippedLogTag(itemName) then
         for _, r in ipairs(proc) do
             if isStrippedLogItem(r.output) then
