@@ -48,6 +48,8 @@ local POWDER_MASS = 121.593455168150
 local CHARGE_LENGTH = 1.0
 
 local CANNON = {
+    -- Going Ballistic estimates mounted cannon length by scanning cannon
+    -- components and summing component length. Stock CBC components use 1m.
     barrels = 6,
     chambers = 1,
     manual_effective_barrels = nil,
@@ -212,17 +214,16 @@ local function calibrateSableOffset(currentPos)
     sleep(1.0)
 end
 
-local function calcEffectiveBarrels(chargeEq)
+local function calcEffectiveBarrels()
     if CANNON.manual_effective_barrels then
         return CANNON.manual_effective_barrels, "manual"
     end
-    local freeChambers = math.max(0, CANNON.chambers - chargeEq)
-    return CANNON.barrels + freeChambers, "auto"
+    return CANNON.barrels + CANNON.chambers, "auto"
 end
 
 local function calcMuzzleVelocity(chargeEq, barrelBlocks, projMass, velMult)
     -- chargeEq drives both propellant energy (p) and column length (c).
-    -- This matches how the CBC mod applies Robins' formula internally.
+    -- Going Ballistic derives chargeEq from CBC chargePower / 2.
     if barrelBlocks <= chargeEq then
         return nil, string.format("barrel too short (need > %.2f)", chargeEq)
     end
@@ -395,19 +396,19 @@ local function chooseMuzzleVelocity()
             projectileName = "manual",
             projectileMass = nil,
             chargeEq = nil,
-            effectiveBarrels = nil,
+            mountedLength = nil,
             velMult = nil,
         }
     end
 
     local projMass, projName = chooseProjectileMass()
     local chargeEq = chooseChargeLoad()
-    local eff, effMode = calcEffectiveBarrels(chargeEq)
+    local eff, effMode = calcEffectiveBarrels()
 
     print(string.format("Cannon config: barrels=%s chambers=%s", tostring(CANNON.barrels), tostring(CANNON.chambers)))
-    print(string.format("Effective barrels (%s): %.2f", effMode, eff))
+    print(string.format("Mounted length (%s): %.2f m", effMode, eff))
 
-    write(string.format("Override effective barrels [%.2f]: ", eff))
+    write(string.format("Override mounted length [%.2f m]: ", eff))
     local s = read()
     local barrelBlocks = eff
     if s ~= "" then
@@ -415,11 +416,11 @@ local function chooseMuzzleVelocity()
         if n then barrelBlocks = n end
     end
     while barrelBlocks <= chargeEq do
-        print(string.format("Need effective barrels > %.2f", chargeEq))
-        barrelBlocks = readNumber("Effective barrels: ", eff)
+        print(string.format("Need mounted length > %.2f m", chargeEq))
+        barrelBlocks = readNumber("Mounted length: ", eff)
     end
 
-    local velMult = readNumber("Velocity multiplier [1.05]: ", 1.05)
+    local velMult = readNumber("Velocity multiplier [1.0]: ", 1.0)
     local v0, err = calcMuzzleVelocity(chargeEq, barrelBlocks, projMass, velMult)
     if not v0 then
         print("Robins error: " .. tostring(err))
@@ -429,7 +430,7 @@ local function chooseMuzzleVelocity()
             projectileName = projName,
             projectileMass = projMass,
             chargeEq = chargeEq,
-            effectiveBarrels = barrelBlocks,
+            mountedLength = barrelBlocks,
             velMult = velMult,
         }
     end
@@ -441,7 +442,7 @@ local function chooseMuzzleVelocity()
         projectileName = projName,
         projectileMass = projMass,
         chargeEq = chargeEq,
-        effectiveBarrels = barrelBlocks,
+        mountedLength = barrelBlocks,
         velMult = velMult,
     }
 end
@@ -475,7 +476,7 @@ local function quickChangeProjectile(speedCfg)
     local newMass, newName = chooseProjectileMass()
     local v0, err = calcMuzzleVelocity(
         speedCfg.chargeEq,
-        speedCfg.effectiveBarrels,
+        speedCfg.mountedLength,
         newMass,
         speedCfg.velMult
     )
