@@ -213,14 +213,10 @@ local function processCasings(outputName, materialName, expected)
             movedMaterial = pushItemTo(cfg.deployer_name, materialName, toLoad)
         end
 
-        local usable = math.min(batch, held + movedMaterial)
-        local movedLogs = pushAnyStrippedLogTo(cfg.depot_name, usable)
-        if usable <= 0 or movedLogs <= 0 then
+        local availableMaterial = math.min(batch, held + movedMaterial)
+        local movedLogs = pushAnyStrippedLogTo(cfg.depot_name, availableMaterial)
+        if availableMaterial <= 0 or movedLogs <= 0 then
             return false, "Could not load deployer/depot for casing batch"
-        end
-        if movedLogs < usable then
-            return false, ("Loaded material for %d but only %d stripped logs"):format(
-                usable, movedLogs)
         end
 
         while os.epoch("utc") < deadline do
