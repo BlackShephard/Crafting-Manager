@@ -782,12 +782,16 @@ local function tryDispatchNext()
             if not findFreeStation(job.rec.station, "processing") then
                 i = i + 1
             else
-                table.remove(queue, i)
-                if ui.queueSel >= i then
-                    ui.queueSel = math.max(0, ui.queueSel - 1)
+                local ok = dispatchProcess(job.rec, job.qty)
+                if ok then
+                    table.remove(queue, i)
+                    if ui.queueSel >= i then
+                        ui.queueSel = math.max(0, ui.queueSel - 1)
+                    end
+                    -- i unchanged; re-check same position (now holds next job)
+                else
+                    i = i + 1
                 end
-                dispatchProcess(job.rec, job.qty)
-                -- i unchanged; re-check same position (now holds next job)
             end
         else
             -- Mechanical crafter job: needs a free CC station
@@ -795,11 +799,15 @@ local function tryDispatchNext()
             if not stName then
                 i = i + 1  -- no station free; skip for now
             else
-                table.remove(queue, i)
-                if ui.queueSel >= i then
-                    ui.queueSel = math.max(0, ui.queueSel - 1)
+                local ok = dispatchCraft(job.rec, job.qty)
+                if ok then
+                    table.remove(queue, i)
+                    if ui.queueSel >= i then
+                        ui.queueSel = math.max(0, ui.queueSel - 1)
+                    end
+                else
+                    i = i + 1
                 end
-                dispatchCraft(job.rec, job.qty)
             end
         end
     end
