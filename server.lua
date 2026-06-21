@@ -298,7 +298,6 @@ end
 local function isStrippedLogItem(name)
     local item = tostring(name):match("^[^:]+:(.+)$") or tostring(name)
     return item:match("^stripped_.+_log$") ~= nil
-        or item:match("^stripped_.+_stem$") ~= nil
 end
 
 local function ingredientKey(name)
