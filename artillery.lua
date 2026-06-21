@@ -69,7 +69,7 @@ local PROJECTILES = {
     {name = "Shrapnel Shell",   mass = 3410.6},
     {name = "AP Shell",         mass = 3159.9},
     {name = "HE Shell",         mass = 2922.4},
-    {name = "Shell Holder MkV",  mass = 2922.4, drag_multiplier = 1.20},
+    {name = "Shell Holder MkV",  mass = 2922.4, velocity_multiplier = 1.02},
     {name = "Fluid Shell",      mass = 2400.0},
     {name = "Drop Mortar Shell", mass = 2255.5},
     {name = "Mortar Stone",     mass = 1162.3},
@@ -501,14 +501,18 @@ local function chooseProjectileMass()
     print("  2) Custom")
     local mode = readNumber("Mode [1/2] (default 1): ", 1)
     if mode == 2 then
-        return readNumber("Mass (kg): ", 2922.4), "Custom", 1.0
+        return readNumber("Mass (kg): ", 2922.4), "Custom", 1.0, 1.0
     end
     for i, p in ipairs(PROJECTILES) do
         local dragText = p.drag_multiplier and string.format(" drag x%.2f", p.drag_multiplier) or ""
-        print(string.format("  %2d) %-18s %.1f kg%s", i, p.name, p.mass, dragText))
+        local velText = p.velocity_multiplier and string.format(" vel x%.2f", p.velocity_multiplier) or ""
+        print(string.format("  %2d) %-18s %.1f kg%s%s", i, p.name, p.mass, velText, dragText))
     end
     local idx = math.floor(clamp(readNumber("Select [5=HE Shell]: ", 5), 1, #PROJECTILES))
-    return PROJECTILES[idx].mass, PROJECTILES[idx].name, PROJECTILES[idx].drag_multiplier or 1.0
+    return PROJECTILES[idx].mass,
+        PROJECTILES[idx].name,
+        PROJECTILES[idx].drag_multiplier or 1.0,
+        PROJECTILES[idx].velocity_multiplier or 1.0
 end
 
 local CHARGE_TYPES = {
@@ -563,6 +567,7 @@ local function chooseMuzzleVelocity()
             projectileName = "manual",
             projectileMass = nil,
             dragMultiplier = nil,
+            projectileVelocityMultiplier = nil,
             chargeEq = nil,
             chargeMeters = nil,
             mountedLength = nil,
@@ -570,7 +575,7 @@ local function chooseMuzzleVelocity()
         }
     end
 
-    local projMass, projName, projDragMult = chooseProjectileMass()
+    local projMass, projName, projDragMult, projVelMult = chooseProjectileMass()
     local chargeEq, chargeMeters = chooseChargeLoad()
     local eff, effMode = calcEffectiveBarrels(chargeMeters)
 
@@ -589,7 +594,8 @@ local function chooseMuzzleVelocity()
         barrelBlocks = readNumber("Effective length: ", eff)
     end
 
-    local velMult = readNumber("Velocity multiplier [1.0]: ", 1.0)
+    local userVelMult = readNumber("Velocity multiplier [1.0]: ", 1.0)
+    local velMult = userVelMult * projVelMult
     local v0, err = calcMuzzleVelocity(chargeEq, barrelBlocks, projMass, velMult)
     if not v0 then
         print("Robins error: " .. tostring(err))
@@ -599,24 +605,31 @@ local function chooseMuzzleVelocity()
             projectileName = projName,
             projectileMass = projMass,
             dragMultiplier = projDragMult,
+            projectileVelocityMultiplier = projVelMult,
             chargeEq = chargeEq,
             chargeMeters = chargeMeters,
             mountedLength = barrelBlocks,
             velMult = velMult,
+            userVelMult = userVelMult,
         }
     end
 
     print(string.format("Projectile: %s (%.1f kg)", projName, projMass))
+    if projVelMult ~= 1.0 then
+        print(string.format("Projectile velocity multiplier: %.2f", projVelMult))
+    end
     print(string.format("Computed v0: %.2f m/s", v0))
     return v0, {
         mode = "robins",
         projectileName = projName,
         projectileMass = projMass,
         dragMultiplier = projDragMult,
+        projectileVelocityMultiplier = projVelMult,
         chargeEq = chargeEq,
         chargeMeters = chargeMeters,
         mountedLength = barrelBlocks,
         velMult = velMult,
+        userVelMult = userVelMult,
     }
 end
 
@@ -646,12 +659,12 @@ local function quickChangeProjectile(speedCfg)
         return nil
     end
 
-    local newMass, newName, newDragMult = chooseProjectileMass()
+    local newMass, newName, newDragMult, newVelMult = chooseProjectileMass()
     local v0, err = calcMuzzleVelocity(
         speedCfg.chargeEq,
         speedCfg.mountedLength,
         newMass,
-        speedCfg.velMult
+        (speedCfg.userVelMult or 1.0) * newVelMult
     )
     if not v0 then
         print("Recompute error: " .. tostring(err))
@@ -662,6 +675,8 @@ local function quickChangeProjectile(speedCfg)
     speedCfg.projectileMass = newMass
     speedCfg.projectileName = newName
     speedCfg.dragMultiplier = newDragMult
+    speedCfg.projectileVelocityMultiplier = newVelMult
+    speedCfg.velMult = (speedCfg.userVelMult or 1.0) * newVelMult
     return v0
 end
 
@@ -811,6 +826,9 @@ local function main()
                 local m = speedCfg.projectileMass
                 if m then
                     print(string.format("Proj  : %s (%.1f kg)", speedCfg.projectileName, m))
+                    if speedCfg.projectileVelocityMultiplier and speedCfg.projectileVelocityMultiplier ~= 1.0 then
+                        print(string.format("Vel x : %.2f", speedCfg.projectileVelocityMultiplier))
+                    end
                     if speedCfg.dragMultiplier and speedCfg.dragMultiplier ~= 1.0 then
                         print(string.format("Drag x: %.2f", speedCfg.dragMultiplier))
                     end
