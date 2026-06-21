@@ -56,10 +56,13 @@ local POWDER_MASS = 121.593455168150
 local CHARGE_LENGTH = 1.0
 
 local CANNON = {
-    -- Effective length is the path in front of the shell:
-    -- barrel blocks plus any empty chamber blocks ahead of the loaded charges.
+    -- Going Ballistic launch logs use the mounted barrel profile length.
     barrels = 6,
     chambers = 2,
+    -- CBC_AT rifled barrels have velocity_multiplier=0.985 per barrel.
+    -- Set to 1.0 for plain barrels with no component velocity multiplier.
+    barrel_velocity_multiplier = 0.985,
+    velocity_multiplier_blocks = 6,
     manual_effective_barrels = nil,
 }
 
@@ -69,7 +72,8 @@ local PROJECTILES = {
     {name = "Shrapnel Shell",   mass = 3410.6},
     {name = "AP Shell",         mass = 3159.9},
     {name = "HE Shell",         mass = 3519.5},
-    {name = "Shell Holder MkV",  mass = 3519.5},
+    -- Debug showed chargePower 8.0 reducing to launch chargeEquivalent 3.3674774169921875.
+    {name = "Shell Holder MkV",  mass = 3519.5, charge_multiplier = 0.8418693542480469},
     {name = "Fluid Shell",      mass = 2400.0},
     {name = "Drop Mortar Shell", mass = 2255.5},
     {name = "Mortar Stone",     mass = 1162.3},
@@ -255,12 +259,16 @@ local function calibrateSableOffset(currentPos)
     sleep(1.0)
 end
 
-local function calcEffectiveBarrels(chargeMeters)
+local function calcEffectiveBarrels()
     if CANNON.manual_effective_barrels then
         return CANNON.manual_effective_barrels, "manual"
     end
-    local emptyChambersAhead = math.max(0, CANNON.chambers - chargeMeters)
-    return CANNON.barrels + emptyChambersAhead, "auto"
+    return CANNON.barrels + CANNON.chambers, "auto"
+end
+
+local function calcCannonVelocityMultiplier()
+    local blocks = CANNON.velocity_multiplier_blocks or CANNON.barrels
+    return (CANNON.barrel_velocity_multiplier or 1.0) ^ blocks
 end
 
 local function calcMuzzleVelocity(chargeEq, barrelBlocks, projMass, velMult)
@@ -501,18 +509,20 @@ local function chooseProjectileMass()
     print("  2) Custom")
     local mode = readNumber("Mode [1/2] (default 1): ", 1)
     if mode == 2 then
-        return readNumber("Mass (kg): ", 2922.4), "Custom", 1.0, 1.0
+        return readNumber("Mass (kg): ", 2922.4), "Custom", 1.0, 1.0, 1.0
     end
     for i, p in ipairs(PROJECTILES) do
         local dragText = p.drag_multiplier and string.format(" drag x%.2f", p.drag_multiplier) or ""
         local velText = p.velocity_multiplier and string.format(" vel x%.2f", p.velocity_multiplier) or ""
-        print(string.format("  %2d) %-18s %.1f kg%s%s", i, p.name, p.mass, velText, dragText))
+        local chargeText = p.charge_multiplier and string.format(" charge x%.3f", p.charge_multiplier) or ""
+        print(string.format("  %2d) %-18s %.1f kg%s%s%s", i, p.name, p.mass, velText, dragText, chargeText))
     end
     local idx = math.floor(clamp(readNumber("Select [5=HE Shell]: ", 5), 1, #PROJECTILES))
     return PROJECTILES[idx].mass,
         PROJECTILES[idx].name,
         PROJECTILES[idx].drag_multiplier or 1.0,
-        PROJECTILES[idx].velocity_multiplier or 1.0
+        PROJECTILES[idx].velocity_multiplier or 1.0,
+        PROJECTILES[idx].charge_multiplier or 1.0
 end
 
 local CHARGE_TYPES = {
@@ -568,6 +578,8 @@ local function chooseMuzzleVelocity()
             projectileMass = nil,
             dragMultiplier = nil,
             projectileVelocityMultiplier = nil,
+            chargeMultiplier = nil,
+            rawChargeEq = nil,
             chargeEq = nil,
             chargeMeters = nil,
             mountedLength = nil,
@@ -575,28 +587,36 @@ local function chooseMuzzleVelocity()
         }
     end
 
-    local projMass, projName, projDragMult, projVelMult = chooseProjectileMass()
+    local projMass, projName, projDragMult, projVelMult, projChargeMult = chooseProjectileMass()
     local chargeEq, chargeMeters = chooseChargeLoad()
-    local eff, effMode = calcEffectiveBarrels(chargeMeters)
+    local launchChargeEq = chargeEq * projChargeMult
+    local eff, effMode = calcEffectiveBarrels()
+    local cannonVelMult = calcCannonVelocityMultiplier()
 
     print(string.format("Cannon config: barrels=%s chambers=%s", tostring(CANNON.barrels), tostring(CANNON.chambers)))
-    print(string.format("Effective barrel length (%s): %.2f m", effMode, eff))
+    print(string.format("Mounted barrel length (%s): %.2f m", effMode, eff))
+    if projChargeMult ~= 1.0 then
+        print(string.format("Launch charge: %.3f eq (raw %.3f x %.3f)", launchChargeEq, chargeEq, projChargeMult))
+    end
+    if cannonVelMult ~= 1.0 then
+        print(string.format("Cannon velocity multiplier: %.3f", cannonVelMult))
+    end
 
-    write(string.format("Override effective length [%.2f m]: ", eff))
+    write(string.format("Override mounted length [%.2f m]: ", eff))
     local s = read()
     local barrelBlocks = eff
     if s ~= "" then
         local n = tonumber(s)
         if n then barrelBlocks = n end
     end
-    while barrelBlocks <= chargeEq do
-        print(string.format("Need effective length > %.2f m", chargeEq))
-        barrelBlocks = readNumber("Effective length: ", eff)
+    while barrelBlocks <= launchChargeEq do
+        print(string.format("Need mounted length > %.2f m", launchChargeEq))
+        barrelBlocks = readNumber("Mounted length: ", eff)
     end
 
     local userVelMult = readNumber("Velocity multiplier [1.0]: ", 1.0)
-    local velMult = userVelMult * projVelMult
-    local v0, err = calcMuzzleVelocity(chargeEq, barrelBlocks, projMass, velMult)
+    local velMult = userVelMult * projVelMult * cannonVelMult
+    local v0, err = calcMuzzleVelocity(launchChargeEq, barrelBlocks, projMass, velMult)
     if not v0 then
         print("Robins error: " .. tostring(err))
         local v0f = readNumber("Enter velocity manually (m/s): ", 180)
@@ -606,9 +626,12 @@ local function chooseMuzzleVelocity()
             projectileMass = projMass,
             dragMultiplier = projDragMult,
             projectileVelocityMultiplier = projVelMult,
-            chargeEq = chargeEq,
+            chargeMultiplier = projChargeMult,
+            rawChargeEq = chargeEq,
+            chargeEq = launchChargeEq,
             chargeMeters = chargeMeters,
             mountedLength = barrelBlocks,
+            cannonVelocityMultiplier = cannonVelMult,
             velMult = velMult,
             userVelMult = userVelMult,
         }
@@ -625,9 +648,12 @@ local function chooseMuzzleVelocity()
         projectileMass = projMass,
         dragMultiplier = projDragMult,
         projectileVelocityMultiplier = projVelMult,
-        chargeEq = chargeEq,
+        chargeMultiplier = projChargeMult,
+        rawChargeEq = chargeEq,
+        chargeEq = launchChargeEq,
         chargeMeters = chargeMeters,
         mountedLength = barrelBlocks,
+        cannonVelocityMultiplier = cannonVelMult,
         velMult = velMult,
         userVelMult = userVelMult,
     }
@@ -659,12 +685,13 @@ local function quickChangeProjectile(speedCfg)
         return nil
     end
 
-    local newMass, newName, newDragMult, newVelMult = chooseProjectileMass()
+    local newMass, newName, newDragMult, newVelMult, newChargeMult = chooseProjectileMass()
+    local launchChargeEq = (speedCfg.rawChargeEq or speedCfg.chargeEq) * newChargeMult
     local v0, err = calcMuzzleVelocity(
-        speedCfg.chargeEq,
+        launchChargeEq,
         speedCfg.mountedLength,
         newMass,
-        (speedCfg.userVelMult or 1.0) * newVelMult
+        (speedCfg.userVelMult or 1.0) * newVelMult * (speedCfg.cannonVelocityMultiplier or 1.0)
     )
     if not v0 then
         print("Recompute error: " .. tostring(err))
@@ -676,7 +703,9 @@ local function quickChangeProjectile(speedCfg)
     speedCfg.projectileName = newName
     speedCfg.dragMultiplier = newDragMult
     speedCfg.projectileVelocityMultiplier = newVelMult
-    speedCfg.velMult = (speedCfg.userVelMult or 1.0) * newVelMult
+    speedCfg.chargeMultiplier = newChargeMult
+    speedCfg.chargeEq = launchChargeEq
+    speedCfg.velMult = (speedCfg.userVelMult or 1.0) * newVelMult * (speedCfg.cannonVelocityMultiplier or 1.0)
     return v0
 end
 
@@ -828,6 +857,12 @@ local function main()
                     print(string.format("Proj  : %s (%.1f kg)", speedCfg.projectileName, m))
                     if speedCfg.projectileVelocityMultiplier and speedCfg.projectileVelocityMultiplier ~= 1.0 then
                         print(string.format("Vel x : %.2f", speedCfg.projectileVelocityMultiplier))
+                    end
+                    if speedCfg.chargeMultiplier and speedCfg.chargeMultiplier ~= 1.0 then
+                        print(string.format("Chg x : %.3f", speedCfg.chargeMultiplier))
+                    end
+                    if speedCfg.cannonVelocityMultiplier and speedCfg.cannonVelocityMultiplier ~= 1.0 then
+                        print(string.format("Gun x : %.3f", speedCfg.cannonVelocityMultiplier))
                     end
                     if speedCfg.dragMultiplier and speedCfg.dragMultiplier ~= 1.0 then
                         print(string.format("Drag x: %.2f", speedCfg.dragMultiplier))
