@@ -69,6 +69,7 @@ local PROJECTILES = {
     {name = "Shrapnel Shell",   mass = 3410.6},
     {name = "AP Shell",         mass = 3159.9},
     {name = "HE Shell",         mass = 2922.4},
+    {name = "Shell Holder MkV",  mass = 2922.4, drag_multiplier = 1.20},
     {name = "Fluid Shell",      mass = 2400.0},
     {name = "Drop Mortar Shell", mass = 2255.5},
     {name = "Mortar Stone",     mass = 1162.3},
@@ -283,15 +284,15 @@ local function worldYawFromUnit(u)
     return wrap360(math.atan2(u.x, -u.z) * 180 / math.pi)
 end
 
-local function dragAccelScale(projectileMass)
+local function dragAccelScale(projectileMass, dragMultiplier)
     if not projectileMass or projectileMass <= 0 then return nil end
     local radius = CONFIG.projectile_diameter_m * 0.5
     local area = math.pi * radius * radius
-    return 0.5 * CONFIG.drag_air_density * CONFIG.drag_coefficient * area / projectileMass
+    return 0.5 * CONFIG.drag_air_density * CONFIG.drag_coefficient * area * (dragMultiplier or 1.0) / projectileMass
 end
 
-local function simulateDragToRange(range, dy, forwardVel, verticalVel, projectileMass)
-    local k = dragAccelScale(projectileMass)
+local function simulateDragToRange(range, dy, forwardVel, verticalVel, projectileMass, dragMultiplier)
+    local k = dragAccelScale(projectileMass, dragMultiplier)
     if not k then return nil, "missing projectile mass for drag" end
 
     local x, y = 0, 0
@@ -331,7 +332,7 @@ local function simulateDragToRange(range, dy, forwardVel, verticalVel, projectil
     return nil, "target out of range with drag"
 end
 
-local function solveBallisticWithDrag(target, shooterPos, shooterVel, muzzleSpeed, arc, projectileMass)
+local function solveBallisticWithDrag(target, shooterPos, shooterVel, muzzleSpeed, arc, projectileMass, dragMultiplier)
     local r = vsub(target, shooterPos)
     local range = math.sqrt(r.x * r.x + r.z * r.z)
     if range < 1e-6 then return nil, "target too close for drag solver" end
@@ -346,7 +347,7 @@ local function solveBallisticWithDrag(target, shooterPos, shooterVel, muzzleSpee
         local forwardVel = muzzleSpeed * math.cos(pr) + shooterForwardVel
         local verticalVel = muzzleSpeed * math.sin(pr) + shooterVerticalVel
         if forwardVel <= 0 then return nil, "projectile not moving toward target" end
-        return simulateDragToRange(range, r.y, forwardVel, verticalVel, projectileMass)
+        return simulateDragToRange(range, r.y, forwardVel, verticalVel, projectileMass, dragMultiplier)
     end
 
     local brackets = {}
@@ -500,13 +501,14 @@ local function chooseProjectileMass()
     print("  2) Custom")
     local mode = readNumber("Mode [1/2] (default 1): ", 1)
     if mode == 2 then
-        return readNumber("Mass (kg): ", 2922.4), "Custom"
+        return readNumber("Mass (kg): ", 2922.4), "Custom", 1.0
     end
     for i, p in ipairs(PROJECTILES) do
-        print(string.format("  %2d) %-18s %.1f kg", i, p.name, p.mass))
+        local dragText = p.drag_multiplier and string.format(" drag x%.2f", p.drag_multiplier) or ""
+        print(string.format("  %2d) %-18s %.1f kg%s", i, p.name, p.mass, dragText))
     end
     local idx = math.floor(clamp(readNumber("Select [5=HE Shell]: ", 5), 1, #PROJECTILES))
-    return PROJECTILES[idx].mass, PROJECTILES[idx].name
+    return PROJECTILES[idx].mass, PROJECTILES[idx].name, PROJECTILES[idx].drag_multiplier or 1.0
 end
 
 local CHARGE_TYPES = {
@@ -560,6 +562,7 @@ local function chooseMuzzleVelocity()
             mode = "manual",
             projectileName = "manual",
             projectileMass = nil,
+            dragMultiplier = nil,
             chargeEq = nil,
             chargeMeters = nil,
             mountedLength = nil,
@@ -567,7 +570,7 @@ local function chooseMuzzleVelocity()
         }
     end
 
-    local projMass, projName = chooseProjectileMass()
+    local projMass, projName, projDragMult = chooseProjectileMass()
     local chargeEq, chargeMeters = chooseChargeLoad()
     local eff, effMode = calcEffectiveBarrels(chargeMeters)
 
@@ -595,6 +598,7 @@ local function chooseMuzzleVelocity()
             mode = "manual",
             projectileName = projName,
             projectileMass = projMass,
+            dragMultiplier = projDragMult,
             chargeEq = chargeEq,
             chargeMeters = chargeMeters,
             mountedLength = barrelBlocks,
@@ -608,6 +612,7 @@ local function chooseMuzzleVelocity()
         mode = "robins",
         projectileName = projName,
         projectileMass = projMass,
+        dragMultiplier = projDragMult,
         chargeEq = chargeEq,
         chargeMeters = chargeMeters,
         mountedLength = barrelBlocks,
@@ -641,7 +646,7 @@ local function quickChangeProjectile(speedCfg)
         return nil
     end
 
-    local newMass, newName = chooseProjectileMass()
+    local newMass, newName, newDragMult = chooseProjectileMass()
     local v0, err = calcMuzzleVelocity(
         speedCfg.chargeEq,
         speedCfg.mountedLength,
@@ -656,6 +661,7 @@ local function quickChangeProjectile(speedCfg)
 
     speedCfg.projectileMass = newMass
     speedCfg.projectileName = newName
+    speedCfg.dragMultiplier = newDragMult
     return v0
 end
 
@@ -769,7 +775,8 @@ local function main()
                         shooterVel,
                         muzzleSpeed,
                         arc,
-                        speedCfg.projectileMass
+                        speedCfg.projectileMass,
+                        speedCfg.dragMultiplier
                     )
                 else
                     sol, err = solveBallistic(target, shooterPosNorm, shooterVel, muzzleSpeed, arc)
@@ -804,6 +811,9 @@ local function main()
                 local m = speedCfg.projectileMass
                 if m then
                     print(string.format("Proj  : %s (%.1f kg)", speedCfg.projectileName, m))
+                    if speedCfg.dragMultiplier and speedCfg.dragMultiplier ~= 1.0 then
+                        print(string.format("Drag x: %.2f", speedCfg.dragMultiplier))
+                    end
                 else
                     print(string.format("Proj  : %s", speedCfg.projectileName))
                 end
