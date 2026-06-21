@@ -27,6 +27,11 @@ local CONFIG = {
     yaw_command_mode = "ship_relative",
     auto_yaw_offset = 270,
 
+    -- Command mode for cannon mount pitch:
+    -- "elevation"  -> command the solved elevation angle directly
+    -- "complement" -> command 90 - solved elevation, useful for some vertical mount frames
+    pitch_command_mode = "elevation",
+
     yaw_offset_deg = 0,
     pitch_offset_deg = 0,
     invert_yaw = false,
@@ -480,9 +485,35 @@ local function toCommandYaw(worldYaw, shipHeading)
 end
 
 local function toCommandPitch(pitchDeg)
-    local p = CONFIG.invert_pitch and -pitchDeg or pitchDeg
+    local p = pitchDeg
+    if CONFIG.pitch_command_mode == "complement" then
+        p = 90 - pitchDeg
+    end
+    if CONFIG.invert_pitch then p = -p end
     p = p + CONFIG.pitch_offset_deg
     return clamp(p, CONFIG.min_pitch, CONFIG.max_pitch)
+end
+
+local function resetTrim()
+    CONFIG.yaw_offset_deg = 0
+    CONFIG.pitch_offset_deg = 0
+end
+
+local function applyHorizontalPreset()
+    CONFIG.yaw_command_mode = "world"
+    CONFIG.pitch_command_mode = "elevation"
+    CONFIG.invert_yaw = false
+    CONFIG.invert_pitch = false
+    resetTrim()
+end
+
+local function togglePitchCommandMode()
+    if CONFIG.pitch_command_mode == "complement" then
+        CONFIG.pitch_command_mode = "elevation"
+    else
+        CONFIG.pitch_command_mode = "complement"
+    end
+    resetTrim()
 end
 
 local function setComputerControl(mount)
@@ -818,6 +849,7 @@ local function main()
             print(string.format("Source:%s  Arc:%s  v0:%.2f (%s)", source, arc, muzzleSpeed, speedCfg.mode))
             print(string.format("Drag  : %s", (CONFIG.drag_enabled and speedCfg.projectileMass) and "on" or "off"))
             print(string.format("Yaw mode: %s / %s", CONFIG.world_yaw_mode, CONFIG.yaw_command_mode))
+            print(string.format("Pitch mode: %s", CONFIG.pitch_command_mode))
             print(string.format("Sable off: (%.1f, %.1f, %.1f)", CONFIG.sable_offset_x, CONFIG.sable_offset_y, CONFIG.sable_offset_z))
             print(string.format("Target: (%.2f, %.2f, %.2f)", target.x, target.y, target.z))
             print(string.format("Shootr: (%.2f, %.2f, %.2f)", shooterPosNorm.x, shooterPosNorm.y, shooterPosNorm.z))
@@ -850,7 +882,7 @@ local function main()
             print(string.format("Trim  yaw/pitch: %+.2f / %+.2f  (arrows to nudge)",
                 CONFIG.yaw_offset_deg, CONFIG.pitch_offset_deg))
             print("")
-            print("F=fire  A=arc  T=retarget  P=proj  V=vel  C=cal  arrows=trim  Q=quit")
+            print("F=fire A=arc T=retarget P=proj V=vel C=cal H=horiz X=pitch R=trim Q=quit")
 
             lastTime = now
             sleep(CONFIG.update_interval_s)
@@ -873,6 +905,12 @@ local function main()
                 pendingVelocityReconfig = true
             elseif key == keys.c then
                 pendingCalibrate = true
+            elseif key == keys.h then
+                applyHorizontalPreset()
+            elseif key == keys.x then
+                togglePitchCommandMode()
+            elseif key == keys.r then
+                resetTrim()
             elseif key == keys.up then
                 CONFIG.pitch_offset_deg = CONFIG.pitch_offset_deg + CONFIG.nudge_step_deg
             elseif key == keys.down then
