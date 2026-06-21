@@ -57,12 +57,12 @@ local CHARGE_LENGTH = 1.0
 
 local CANNON = {
     -- Going Ballistic launch logs use the mounted barrel profile length.
-    barrels = 6,
+    rifled_barrels = 6,
+    unrifled_barrels = 0,
     chambers = 2,
-    -- CBC_AT rifled barrels have velocity_multiplier=0.985 per barrel.
-    -- Set to 1.0 for plain barrels with no component velocity multiplier.
-    barrel_velocity_multiplier = 0.985,
-    velocity_multiplier_blocks = 6,
+    -- CBC_AT rifled barrels have velocity_multiplier=0.985 per rifled barrel.
+    -- Plain/unrifled barrels use 1.0 and only add length.
+    rifled_velocity_multiplier = 0.985,
     manual_effective_barrels = nil,
 }
 
@@ -263,12 +263,11 @@ local function calcEffectiveBarrels()
     if CANNON.manual_effective_barrels then
         return CANNON.manual_effective_barrels, "manual"
     end
-    return CANNON.barrels + CANNON.chambers, "auto"
+    return (CANNON.rifled_barrels or 0) + (CANNON.unrifled_barrels or 0) + CANNON.chambers, "auto"
 end
 
 local function calcCannonVelocityMultiplier()
-    local blocks = CANNON.velocity_multiplier_blocks or CANNON.barrels
-    return (CANNON.barrel_velocity_multiplier or 1.0) ^ blocks
+    return (CANNON.rifled_velocity_multiplier or 1.0) ^ (CANNON.rifled_barrels or 0)
 end
 
 local function calcMuzzleVelocity(chargeEq, barrelBlocks, projMass, velMult)
@@ -593,7 +592,12 @@ local function chooseMuzzleVelocity()
     local eff, effMode = calcEffectiveBarrels()
     local cannonVelMult = calcCannonVelocityMultiplier()
 
-    print(string.format("Cannon config: barrels=%s chambers=%s", tostring(CANNON.barrels), tostring(CANNON.chambers)))
+    print(string.format(
+        "Cannon config: rifled=%s unrifled=%s chambers=%s",
+        tostring(CANNON.rifled_barrels),
+        tostring(CANNON.unrifled_barrels),
+        tostring(CANNON.chambers)
+    ))
     print(string.format("Mounted barrel length (%s): %.2f m", effMode, eff))
     if projChargeMult ~= 1.0 then
         print(string.format("Launch charge: %.3f eq (raw %.3f x %.3f)", launchChargeEq, chargeEq, projChargeMult))
