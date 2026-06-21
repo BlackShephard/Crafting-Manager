@@ -4,6 +4,14 @@
 
 local CONFIG = {
     gravity = 9.81,
+    drag_enabled = true,
+    drag_air_density = 1.225,
+    drag_coefficient = 0.47,
+    projectile_diameter_m = 0.754441738242,
+    drag_step_s = 0.05,
+    drag_max_time_s = 120.0,
+    drag_pitch_scan_step_deg = 2.0,
+    drag_bisect_steps = 18,
     update_interval_s = 0.10,
     fire_hold_s = 0.20,
     velocity_alpha = 0.70,
@@ -273,6 +281,128 @@ local function worldYawFromUnit(u)
         return wrap360(math.atan2(u.z, u.x) * 180 / math.pi)
     end
     return wrap360(math.atan2(u.x, -u.z) * 180 / math.pi)
+end
+
+local function dragAccelScale(projectileMass)
+    if not projectileMass or projectileMass <= 0 then return nil end
+    local radius = CONFIG.projectile_diameter_m * 0.5
+    local area = math.pi * radius * radius
+    return 0.5 * CONFIG.drag_air_density * CONFIG.drag_coefficient * area / projectileMass
+end
+
+local function simulateDragToRange(range, dy, forwardVel, verticalVel, projectileMass)
+    local k = dragAccelScale(projectileMass)
+    if not k then return nil, "missing projectile mass for drag" end
+
+    local x, y = 0, 0
+    local vx, vy = forwardVel, verticalVel
+    local lastX, lastY, lastT = x, y, 0
+    local dt = CONFIG.drag_step_s
+    local t = 0
+
+    while t < CONFIG.drag_max_time_s do
+        local speed = math.sqrt(vx * vx + vy * vy)
+        local ax, ay = 0, -CONFIG.gravity
+        if speed > 1e-6 then
+            ax = ax - k * speed * vx
+            ay = ay - k * speed * vy
+        end
+
+        vx = vx + ax * dt
+        vy = vy + ay * dt
+        lastX, lastY, lastT = x, y, t
+        x = x + vx * dt
+        y = y + vy * dt
+        t = t + dt
+
+        if x >= range then
+            local denom = x - lastX
+            local a = (denom > 1e-9) and ((range - lastX) / denom) or 0
+            local hitY = lastY + (y - lastY) * a
+            local hitT = lastT + (t - lastT) * a
+            return hitY - dy, hitT
+        end
+
+        if y < dy - 2000 and vy < 0 then
+            return nil, "fell below target before reaching range"
+        end
+    end
+
+    return nil, "target out of range with drag"
+end
+
+local function solveBallisticWithDrag(target, shooterPos, shooterVel, muzzleSpeed, arc, projectileMass)
+    local r = vsub(target, shooterPos)
+    local range = math.sqrt(r.x * r.x + r.z * r.z)
+    if range < 1e-6 then return nil, "target too close for drag solver" end
+
+    local horiz = v(r.x / range, 0, r.z / range)
+    local worldYaw = worldYawFromUnit(horiz)
+    local shooterForwardVel = vdot(shooterVel, horiz)
+    local shooterVerticalVel = shooterVel.y
+
+    local function heightError(pitchDeg)
+        local pr = pitchDeg * math.pi / 180
+        local forwardVel = muzzleSpeed * math.cos(pr) + shooterForwardVel
+        local verticalVel = muzzleSpeed * math.sin(pr) + shooterVerticalVel
+        if forwardVel <= 0 then return nil, "projectile not moving toward target" end
+        return simulateDragToRange(range, r.y, forwardVel, verticalVel, projectileMass)
+    end
+
+    local brackets = {}
+    local step = CONFIG.drag_pitch_scan_step_deg
+    local lastPitch, lastErr = nil, nil
+    local p = CONFIG.min_pitch
+    while p <= CONFIG.max_pitch do
+        local err = heightError(p)
+        if err then
+            if lastErr and lastErr * err <= 0 then
+                brackets[#brackets + 1] = {lo = lastPitch, hi = p}
+            end
+            lastPitch, lastErr = p, err
+        end
+        p = p + step
+    end
+
+    if #brackets == 0 then
+        return nil, "target out of range with drag"
+    end
+
+    local bracket = (arc == "high") and brackets[#brackets] or brackets[1]
+    local lo, hi = bracket.lo, bracket.hi
+    local errLo = heightError(lo)
+    local bestPitch, bestErr, bestTof = lo, math.abs(errLo or 1e9), nil
+
+    for _ = 1, CONFIG.drag_bisect_steps do
+        local mid = 0.5 * (lo + hi)
+        local errMid, tofMid = heightError(mid)
+        if errMid then
+            if math.abs(errMid) < bestErr then
+                bestPitch, bestErr, bestTof = mid, math.abs(errMid), tofMid
+            end
+            if errLo and errLo * errMid <= 0 then
+                hi = mid
+            else
+                lo = mid
+                errLo = errMid
+            end
+        else
+            hi = mid
+        end
+    end
+
+    local finalErr, finalTof = heightError(bestPitch)
+    bestTof = finalTof or bestTof
+
+    return {
+        worldYaw = worldYaw,
+        pitch = bestPitch,
+        tof = bestTof or 0,
+        range = range,
+        dy = r.y,
+        drag = true,
+        missY = finalErr,
+    }
 end
 
 local function solveBallistic(target, shooterPos, shooterVel, muzzleSpeed, arc)
@@ -632,7 +762,18 @@ local function main()
             local sol, err = nil, nil
             local cmdYaw, cmdPitch = nil, nil
             if not calibratedNow then
-                sol, err = solveBallistic(target, shooterPosNorm, shooterVel, muzzleSpeed, arc)
+                if CONFIG.drag_enabled and speedCfg.projectileMass then
+                    sol, err = solveBallisticWithDrag(
+                        target,
+                        shooterPosNorm,
+                        shooterVel,
+                        muzzleSpeed,
+                        arc,
+                        speedCfg.projectileMass
+                    )
+                else
+                    sol, err = solveBallistic(target, shooterPosNorm, shooterVel, muzzleSpeed, arc)
+                end
                 if sol then
                     cmdYaw = toCommandYaw(sol.worldYaw, shipHeading)
                     cmdPitch = toCommandPitch(sol.pitch)
@@ -653,6 +794,7 @@ local function main()
             term.setCursorPos(1, 1)
             print("=== Artillery (Direct cannon_mount) ===")
             print(string.format("Source:%s  Arc:%s  v0:%.2f (%s)", source, arc, muzzleSpeed, speedCfg.mode))
+            print(string.format("Drag  : %s", (CONFIG.drag_enabled and speedCfg.projectileMass) and "on" or "off"))
             print(string.format("Yaw mode: %s / %s", CONFIG.world_yaw_mode, CONFIG.yaw_command_mode))
             print(string.format("Sable off: (%.1f, %.1f, %.1f)", CONFIG.sable_offset_x, CONFIG.sable_offset_y, CONFIG.sable_offset_z))
             print(string.format("Target: (%.2f, %.2f, %.2f)", target.x, target.y, target.z))
