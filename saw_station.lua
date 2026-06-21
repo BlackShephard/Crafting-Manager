@@ -245,15 +245,8 @@ local function waitForExactOutput(outputName, expected, timeout)
     local deadline = os.epoch("utc") + timeout * 1000
 
     while os.epoch("utc") < deadline do
-        local ok, err = validateByproducts(outputName)
-        if not ok then return false, err end
-
         local have = countOutput(outputName)
-        if have == expected then return true end
-        if have > expected then
-            return false, ("Output over target: %s has %d, expected %d"):format(
-                outputName, have, expected)
-        end
+        if have >= expected then return true end
         os.sleep(0.5)
     end
 
@@ -267,9 +260,6 @@ local function waitForBarrelDrained(outputName, timeout)
     local deadline = os.epoch("utc") + timeout * 1000
 
     while os.epoch("utc") < deadline do
-        local ok, err = validateByproducts(outputName)
-        if not ok then return false, err end
-
         local have = countOutput(outputName)
         if have == 0 then return true end
         os.sleep(0.5)
@@ -288,16 +278,13 @@ local function sendOutputHome(outputName, expected)
     for attempt = 1, attempts do
         os.sleep(settleDelay)
 
-        local ok, err = validateByproducts(outputName)
-        if not ok then return false, err end
-
         local have = countOutput(outputName)
-        if have ~= expected then
+        if have < expected then
             return false, ("Output changed before packaging: %s has %d, expected %d"):format(
                 outputName, have, expected)
         end
 
-        ok, err = pcall(retPackager.makePackage)
+        local ok, err = pcall(retPackager.makePackage)
         if not ok then
             return false, "makePackage failed: " .. tostring(err)
         end

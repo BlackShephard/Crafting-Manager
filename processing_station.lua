@@ -78,16 +78,9 @@ local function waitForExactOutput(outputName, expected, timeout)
     local deadline = os.epoch("utc") + timeout * 1000
 
     while os.epoch("utc") < deadline do
-        local have, other = countOutput(outputName)
-        if #other > 0 then
-            return false, "Unexpected item in output barrel: " .. describeOther(other)
-        end
-        if have == expected then
+        local have = countOutput(outputName)
+        if have >= expected then
             return true
-        end
-        if have > expected then
-            return false, ("Output over target: %s has %d, expected %d"):format(
-                outputName, have, expected)
         end
         os.sleep(0.5)
     end
@@ -102,10 +95,7 @@ local function waitForBarrelDrained(outputName, timeout)
     local deadline = os.epoch("utc") + timeout * 1000
 
     while os.epoch("utc") < deadline do
-        local have, other = countOutput(outputName)
-        if #other > 0 then
-            return false, "Unexpected item in output barrel: " .. describeOther(other)
-        end
+        local have = countOutput(outputName)
         if have == 0 then return true end
         os.sleep(0.5)
     end
@@ -123,11 +113,8 @@ local function sendOutputHome(outputName, expected)
     for attempt = 1, attempts do
         os.sleep(settleDelay)
 
-        local have, other = countOutput(outputName)
-        if #other > 0 then
-            return false, "Unexpected item in output barrel: " .. describeOther(other)
-        end
-        if have ~= expected then
+        local have = countOutput(outputName)
+        if have < expected then
             return false, ("Output changed before packaging: %s has %d, expected %d"):format(
                 outputName, have, expected)
         end

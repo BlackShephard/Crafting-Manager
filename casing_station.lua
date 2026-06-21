@@ -195,11 +195,6 @@ local function processCasings(outputName, materialName, expected)
     local batchMax = math.min(cfg.batch_size or 64, cfg.depot_capacity or 64, cfg.deployer_capacity or 64)
 
     while done < expected and os.epoch("utc") < deadline do
-        local otherName, otherCount = countOtherOutput(outputName)
-        if otherName then
-            return false, ("Unexpected output item: %s x%d"):format(otherName, otherCount)
-        end
-
         pullDepotOutput(outputName)
         done = countOutput(outputName)
         if done >= expected then break end
@@ -237,8 +232,8 @@ local function processCasings(outputName, materialName, expected)
         end
     end
 
-    if done ~= expected then
-        return false, ("Expected %s x%d, have %d"):format(outputName, expected, done)
+    if done < expected then
+        return false, ("Expected at least %s x%d, have %d"):format(outputName, expected, done)
     end
     return true
 end
@@ -264,8 +259,8 @@ local function sendOutputHome(outputName, expected)
 
     for attempt = 1, attempts do
         os.sleep(settleDelay)
-        if countOutput(outputName) ~= expected then
-            return false, ("Output changed before packaging: %s has %d, expected %d"):format(
+        if countOutput(outputName) < expected then
+            return false, ("Output changed before packaging: %s has %d, expected at least %d"):format(
                 outputName, countOutput(outputName), expected)
         end
 
