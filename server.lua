@@ -402,6 +402,31 @@ local function rawSourceForStripped(source)
     return ns .. ":" .. path
 end
 
+local function outputFromPlanks(planks, suffix)
+    local ns, path = tostring(planks):match("^([^:]+):(.+)_planks$")
+    if not ns or not path then return nil end
+    return ns .. ":" .. path .. suffix
+end
+
+local function addGeneratedSawRecipe(existing, output, outputCount, input, inputCount, route)
+    if not output or not input then return end
+    local outKey = itemKey(output)
+    if existing[outKey] or isInvalidItem(output) or isInvalidItem(input) then return end
+
+    proc[#proc + 1] = {
+        id           = "saw_" .. safeId(output),
+        name         = titleFromItem(output),
+        type         = "saw",
+        station      = "saw_station",
+        output       = output,
+        output_count = outputCount,
+        ingredients  = { { item = input, count = inputCount } },
+        route        = route,
+        generated    = true,
+    }
+    existing[outKey] = true
+end
+
 local function addGeneratedSawRecipes()
     local existing = {}
     for _, r in ipairs(proc) do
@@ -429,19 +454,13 @@ local function addGeneratedSawRecipes()
                 existing[sourceKey] = true
             end
 
-            proc[#proc + 1] = {
-                id           = "saw_" .. safeId(planks),
-                name         = titleFromItem(planks),
-                type         = "saw",
-                station      = "saw_station",
-                output       = planks,
-                output_count = 6,
-                ingredients  = { { item = source, count = 1 } },
-                route        = "plank",
-                generated    = true,
-            }
-            existing[outKey] = true
+            addGeneratedSawRecipe(existing, planks, 6, source, 1, "plank")
         end
+
+        addGeneratedSawRecipe(existing,
+            outputFromPlanks(planks, "_fence"), 3, planks, 4, "fence")
+        addGeneratedSawRecipe(existing,
+            outputFromPlanks(planks, "_fence_gate"), 1, planks, 2, "fence_gate")
     end
 
     for _, r in ipairs(recipes) do
@@ -1860,7 +1879,8 @@ buildFilteredRec("")
 ui.status = "Ready. Server ID: " .. os.computerID()
 drawUI()
 
-local refreshTimer = os.startTimer(10)
+local vaultRefreshInterval = cfg.vault_refresh_interval or 15
+local refreshTimer = os.startTimer(vaultRefreshInterval)
 
 while true do
     local ev = { os.pullEvent() }
@@ -1900,6 +1920,6 @@ while true do
         checkMinStock()
         tryDispatchNext()
         drawUI()
-        refreshTimer = os.startTimer(10)
+        refreshTimer = os.startTimer(vaultRefreshInterval)
     end
 end

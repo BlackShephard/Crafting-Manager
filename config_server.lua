@@ -23,4 +23,7 @@ cfg.stock_ticker_name    = "Create_StockTicker_0"
 cfg.return_arrival_timeout = 20
 cfg.return_arrival_scan_interval = 0.5
 
+-- Periodically rescan the vault and retry queued jobs. This catches items
+-- that arrive from other machines, manual inserts, or delayed logistics.
+cfg.vault_refresh_interval = 15
 return cfg

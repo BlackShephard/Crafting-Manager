@@ -362,6 +362,12 @@ local function executeCraft(recipe, qty)
         local ok, err = loadCrafter(recipe, 1)
         if not ok then return false, err end
 
+        local delay = cfg.redstone_delay or 0
+        if delay > 0 then
+            print(("  Waiting %.1fs before craft pulse..."):format(delay))
+            os.sleep(delay)
+        end
+
         if cfg.redstone_side then
             redstone.setOutput(cfg.redstone_side, true)
             os.sleep(0.2)
