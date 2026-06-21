@@ -24,7 +24,7 @@ local CONFIG = {
     -- Cannon mount setup:
     -- "vertical"   -> cannon assembled vertically; old working setup with -90 pitch offset
     -- "horizontal" -> cannon assembled horizontally; command solved elevation directly
-    mount_profile = "vertical",
+    mount_profile = "horizontal",
 
     -- Command mode for cannon mount yaw:
     -- "world"         -> setTargetAngles(yaw_world, pitch)
