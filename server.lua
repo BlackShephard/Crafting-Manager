@@ -279,10 +279,38 @@ local function isGenericPlanksTag(name)
         or key == "planks"
 end
 
+local function isGenericStrippedLogTag(name)
+    if type(name) ~= "string" then return false end
+    local key = name:gsub("^TODO:", "")
+    return key == "c:stripped_logs"
+        or key == "c:stripped_logs/wooden"
+        or key == "c:stripped_wooden_logs"
+        or key == "minecraft:stripped_logs"
+        or key == "stripped_logs"
+end
+
 local function isPlankItem(name)
     local key = itemKey(name)
     return type(key) == "string"
         and (key:sub(-7) == "_planks" or key:sub(-6) == "planks")
+end
+
+local function isStrippedLogItem(name)
+    local item = tostring(name):match("^[^:]+:(.+)$") or tostring(name)
+    return item:match("^stripped_.+_log$") ~= nil
+        or item:match("^stripped_.+_stem$") ~= nil
+end
+
+local function ingredientKey(name)
+    if isGenericPlanksTag(name) then return "c:planks" end
+    if isGenericStrippedLogTag(name) then return "c:stripped_logs" end
+    return itemKey(name)
+end
+
+local function dispatchKey(name)
+    if isGenericPlanksTag(name) then return "<any_planks>" end
+    if isGenericStrippedLogTag(name) then return "<any_stripped_log>" end
+    return itemKey(name)
 end
 
 local function isInvalidItem(name)
@@ -500,6 +528,15 @@ local function stockOf(itemName)
         end
         return total
     end
+    if isGenericStrippedLogTag(itemName) then
+        local total = 0
+        for _, it in ipairs(invItems) do
+            if isStrippedLogItem(it.name) then
+                total = total + it.count
+            end
+        end
+        return total
+    end
     local resolved = itemKey(itemName)
     for _, it in ipairs(invItems) do
         if itemKey(it.name) == resolved then return it.count end
@@ -512,11 +549,11 @@ local function canCraft(rec, qty)
     qty = qty or 1
     local needed = {}
     for _, ing in ipairs(rec.ingredients) do
-        local item = isGenericPlanksTag(ing.item) and "<any_planks>" or itemKey(ing.item)
+        local item = ingredientKey(ing.item)
         needed[item] = (needed[item] or 0) + ing.count * qty
     end
     for item, n in pairs(needed) do
-        local have = item == "<any_planks>" and stockOf("c:planks") or stockOf(item)
+        local have = stockOf(item)
         if have < n then return false end
     end
     return true
@@ -528,7 +565,7 @@ local function requestItems(recipe, qty)
     local needed = {}
     local order  = {}
     for _, ing in ipairs(recipe.ingredients) do
-        local item = isGenericPlanksTag(ing.item) and "<any_planks>" or itemKey(ing.item)
+        local item = dispatchKey(ing.item)
         if needed[item] then
             needed[item] = needed[item] + ing.count * qty
         else
@@ -543,7 +580,8 @@ local function requestItems(recipe, qty)
 
     for _, item in ipairs(order) do
         local count    = needed[item]
-        local realItem = item == "<any_planks>" and nil or resolveItem(item)
+        local realItem = (item == "<any_planks>" or item == "<any_stripped_log>")
+            and nil or resolveItem(item)
         local moved    = 0
         for slot, stack in pairs(vault.list()) do
             if moved >= count then break end
@@ -551,6 +589,8 @@ local function requestItems(recipe, qty)
             local matches = false
             if item == "<any_planks>" then
                 matches = isPlankItem(stack.name)
+            elseif item == "<any_stripped_log>" then
+                matches = isStrippedLogItem(stack.name)
             else
                 matches = stackKey == itemKey(realItem)
             end
@@ -565,7 +605,9 @@ local function requestItems(recipe, qty)
             for slot in pairs(dispatchBarrel.list()) do
                 dispatchBarrel.pushItems(cfg.vault_name, slot)
             end
-            local missingName = item == "<any_planks>" and "planks" or realItem
+            local missingName = item == "<any_planks>" and "planks"
+                or item == "<any_stripped_log>" and "stripped logs"
+                or realItem
             return false,
                 ("Not enough %s: need %d, have %d"):format(missingName, count, moved)
         end
@@ -895,7 +937,7 @@ end
 local function maxCraftable(rec)
     local needed = {}
     for _, ing in ipairs(rec.ingredients) do
-        local item = isGenericPlanksTag(ing.item) and "c:planks" or itemKey(ing.item)
+        local item = ingredientKey(ing.item)
         needed[item] = (needed[item] or 0) + ing.count
     end
     if not next(needed) then return math.huge end
@@ -911,7 +953,7 @@ end
 local function getMissing(rec, qty)
     local needed = {}
     for _, ing in ipairs(rec.ingredients) do
-        local item = isGenericPlanksTag(ing.item) and "c:planks" or itemKey(ing.item)
+        local item = ingredientKey(ing.item)
         needed[item] = (needed[item] or 0) + ing.count * qty
     end
     local out = {}
@@ -935,6 +977,18 @@ end
 -- Find the first recipe that outputs itemName. Processing recipes are preferred
 -- because they encode explicit station routing for things like sheets and saw cuts.
 local function findRecipeFor(itemName)
+    if isGenericStrippedLogTag(itemName) then
+        for _, r in ipairs(proc) do
+            if isStrippedLogItem(r.output) then
+                local ing = r.ingredients and r.ingredients[1]
+                if ing and stockOf(ing.item) > 0 then return r end
+            end
+        end
+        for _, r in ipairs(proc) do
+            if isStrippedLogItem(r.output) then return r end
+        end
+    end
+
     local key = itemKey(itemName)
     for _, r in ipairs(proc) do
         if itemKey(r.output) == key then return r end
@@ -984,7 +1038,7 @@ buildCraftPlan = function(itemName, qty, plan, projected, depth)
     -- Recurse into each ingredient (dependencies before self)
     local needed = {}
     for _, ing in ipairs(rec.ingredients) do
-        local item = itemKey(ing.item)
+        local item = ingredientKey(ing.item)
         needed[item] = (needed[item] or 0) + ing.count * crafts
     end
     for item, n in pairs(needed) do

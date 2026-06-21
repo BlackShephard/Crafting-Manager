@@ -147,12 +147,8 @@ return {
     -- ================================================================
     --  CASING MAKER  --  Deployer applies casing material to stripped log
     --  station address: "casing_station"
-    --  Feed stripped log + casing material; deployer right-clicks
-    --  the log with the material, converting it to the casing type.
-    --  NOTE: each casing type needs the deployer pre-loaded with
-    --  the correct material (alloy / brass ingot / copper ingot).
-    --  Use separate sub-stations if you want all three automatically,
-    --  or manually swap the deployer item between runs.
+    --  Feed any stripped log + casing material; the casing station
+    --  moves the log to the depot and the material into the deployer hand.
     -- ================================================================
 
     {
@@ -160,7 +156,7 @@ return {
         type="deploy", station="casing_station",
         output="create:andesite_casing", output_count=1,
         ingredients = {
-            {item="minecraft:stripped_oak_log", count=1},
+            {item="c:stripped_logs",            count=1},
             {item="create:andesite_alloy",      count=1},
         },
     },
@@ -169,7 +165,7 @@ return {
         type="deploy", station="casing_station",
         output="create:brass_casing",    output_count=1,
         ingredients = {
-            {item="minecraft:stripped_oak_log", count=1},
+            {item="c:stripped_logs",            count=1},
             {item="create:brass_ingot",         count=1},
         },
     },
@@ -178,7 +174,7 @@ return {
         type="deploy", station="casing_station",
         output="create:copper_casing",   output_count=1,
         ingredients = {
-            {item="minecraft:stripped_oak_log", count=1},
+            {item="c:stripped_logs",            count=1},
             {item="minecraft:copper_ingot",     count=1},
         },
     },
