@@ -26,4 +26,8 @@ cfg.return_arrival_scan_interval = 0.5
 -- Periodically rescan the vault and retry queued jobs. This catches items
 -- that arrive from other machines, manual inserts, or delayed logistics.
 cfg.vault_refresh_interval = 15
+
+-- Ask running stations to re-announce themselves. This lets stations reconnect
+-- after the server computer restarts without restarting each station.
+cfg.station_discovery_interval = 30
 return cfg

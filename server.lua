@@ -1954,6 +1954,10 @@ local function handleMsg(sid, msg)
     end
 end
 
+local function discoverStations()
+    rednet.broadcast({ type = "DISCOVER_STATIONS" }, PROTO)
+end
+
 -- Main loop
 
 boot()
@@ -1964,6 +1968,9 @@ drawUI()
 
 local vaultRefreshInterval = cfg.vault_refresh_interval or 15
 local refreshTimer = os.startTimer(vaultRefreshInterval)
+local stationDiscoveryInterval = cfg.station_discovery_interval or 30
+discoverStations()
+local stationDiscoveryTimer = os.startTimer(stationDiscoveryInterval)
 
 while true do
     local ev = { os.pullEvent() }
@@ -2004,5 +2011,9 @@ while true do
         tryDispatchNext()
         drawUI()
         refreshTimer = os.startTimer(vaultRefreshInterval)
+
+    elseif ev[1] == "timer" and ev[2] == stationDiscoveryTimer then
+        discoverStations()
+        stationDiscoveryTimer = os.startTimer(stationDiscoveryInterval)
     end
 end

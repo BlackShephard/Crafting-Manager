@@ -438,6 +438,9 @@ while true do
             print("[" .. cfg.station_name
                   .. "] Registered with server #" .. sid)
 
+        elseif msg.type == "DISCOVER_STATIONS" then
+            registerWithServer()
+
         elseif msg.type == "REQUEST" then
             local recipe = findRecipe(msg.recipe)
             if not recipe then

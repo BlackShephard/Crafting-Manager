@@ -326,6 +326,9 @@ while true do
             print("[" .. cfg.station_name
                   .. "] Registered with server #" .. sid)
 
+        elseif msg.type == "DISCOVER_STATIONS" then
+            registerWithServer()
+
         elseif msg.type == "PROCESS_REQUEST" then
             rednet.send(sid, { type = "ACCEPT", id = msg.id }, PROTO)
 
