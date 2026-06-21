@@ -48,8 +48,8 @@ local POWDER_MASS = 121.593455168150
 local CHARGE_LENGTH = 1.0
 
 local CANNON = {
-    -- Going Ballistic estimates mounted cannon length by scanning cannon
-    -- components and summing component length. Stock CBC components use 1m.
+    -- Acceleration length is the open barrel path in front of the loaded shell.
+    -- Chambers affect loading/capacity but should not be added to muzzle velocity.
     barrels = 6,
     chambers = 1,
     manual_effective_barrels = nil,
@@ -250,7 +250,7 @@ local function calcEffectiveBarrels()
     if CANNON.manual_effective_barrels then
         return CANNON.manual_effective_barrels, "manual"
     end
-    return CANNON.barrels + CANNON.chambers, "auto"
+    return CANNON.barrels, "auto"
 end
 
 local function calcMuzzleVelocity(chargeEq, barrelBlocks, projMass, velMult)
@@ -438,9 +438,9 @@ local function chooseMuzzleVelocity()
     local eff, effMode = calcEffectiveBarrels()
 
     print(string.format("Cannon config: barrels=%s chambers=%s", tostring(CANNON.barrels), tostring(CANNON.chambers)))
-    print(string.format("Mounted length (%s): %.2f m", effMode, eff))
+    print(string.format("Barrel length (%s): %.2f m", effMode, eff))
 
-    write(string.format("Override mounted length [%.2f m]: ", eff))
+    write(string.format("Override barrel length [%.2f m]: ", eff))
     local s = read()
     local barrelBlocks = eff
     if s ~= "" then
@@ -448,8 +448,8 @@ local function chooseMuzzleVelocity()
         if n then barrelBlocks = n end
     end
     while barrelBlocks <= chargeEq do
-        print(string.format("Need mounted length > %.2f m", chargeEq))
-        barrelBlocks = readNumber("Mounted length: ", eff)
+        print(string.format("Need barrel length > %.2f m", chargeEq))
+        barrelBlocks = readNumber("Barrel length: ", eff)
     end
 
     local velMult = readNumber("Velocity multiplier [1.0]: ", 1.0)
