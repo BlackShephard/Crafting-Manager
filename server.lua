@@ -167,6 +167,8 @@ local TAG_MAP = {
     ["o:nuggets/iron"]           = "minecraft:iron_nugget",
     ["c:nuggets/gold"]           = "minecraft:gold_nugget",
     ["o:nuggets/gold"]           = "minecraft:gold_nugget",
+    ["c:nuggets/zinc"]           = "create:zinc_nugget",
+    ["o:nuggets/zinc"]           = "create:zinc_nugget",
     -- Gems
     ["c:gems/diamond"]           = "minecraft:diamond",
     ["o:gems/diamond"]           = "minecraft:diamond",
@@ -221,6 +223,8 @@ local TAG_MAP = {
     ["c:large_cogwheels"]        = "create:large_cogwheel",
     ["c:brass_sheets"]           = "create:brass_sheet",
     ["c:copper_sheets"]          = "create:copper_sheet",
+    ["c:gold_sheets"]            = "create:golden_sheet",
+    ["c:plates/gold"]            = "create:golden_sheet",
     ["c:iron_sheets"]            = "create:iron_sheet",
     ["c:zinc_sheets"]            = "create:zinc_sheet",
     -- Dyes

@@ -98,6 +98,38 @@ def pattern_to_ingredients(pattern, key, tag_reg=None):
     return ingredients, warnings
 
 
+def shapeless_to_ingredients(ingredient_defs, tag_reg=None):
+    """
+    Convert a shapeless recipe ingredient list into deterministic 3x3 slots.
+
+    Mechanical crafters still need items inserted into slots, so shapeless
+    ingredients are placed left-to-right, top-to-bottom.
+    """
+    ingredients = []
+    warnings = []
+
+    for idx, ing_def in enumerate(ingredient_defs):
+        slot = idx + 1
+        item, is_tag = get_ingredient_item(ing_def)
+        if item is None:
+            warnings.append(f"slot {slot}: empty ingredient definition")
+            continue
+
+        if is_tag:
+            resolved = tag_reg.resolve(item) if tag_reg else None
+            if resolved:
+                item = resolved
+            else:
+                warnings.append(
+                    f"slot {slot}: tag '{item}' unresolved -- replace manually"
+                )
+                item = "TODO:" + item
+
+        ingredients.append({"item": item, "count": 1, "slot": slot})
+
+    return ingredients, warnings
+
+
 def get_result(result):
     """Return (item_id, count) from a result field (handles 1.21 and older formats)."""
     if isinstance(result, str):
@@ -181,6 +213,9 @@ VANILLA_TAGS = {
     "create:brass_items":                 ["create:brass_ingot"],
     "create:copper_items":                ["minecraft:copper_ingot"],
     "create:zinc_items":                  ["create:zinc_ingot"],
+    "c:nuggets/zinc":                     ["create:zinc_nugget"],
+    "c:gold_sheets":                      ["create:golden_sheet"],
+    "c:plates/gold":                      ["create:golden_sheet"],
     "create:crushed_ores":                ["create:crushed_iron_ore"],
     "create:fan_processing_catalysts/blasting": ["minecraft:lava_bucket"],
     "create:fan_processing_catalysts/smoking":  ["minecraft:campfire"],
@@ -250,12 +285,14 @@ class TagRegistry:
 # ── JAR scanning ──────────────────────────────────────────────────────────────
 
 SHAPED_TYPES = {"minecraft:crafting_shaped", "create:mechanical_crafting"}
+SHAPELESS_TYPES = {"minecraft:crafting_shapeless"}
 
 
 def scan_jar(jar_path, station_name, tag_reg=None):
     """
     Open one JAR and return (recipes, skipped_count).
-    Extracts minecraft:crafting_shaped and create:mechanical_crafting recipes
+Extracts minecraft:crafting_shaped, minecraft:crafting_shapeless,
+create:mechanical_crafting recipes
     that fit within a 3×3 grid.  tag_reg is used to resolve tag ingredients.
     """
     recipes = []
@@ -280,7 +317,8 @@ def scan_jar(jar_path, station_name, tag_reg=None):
                     skipped += 1
                     continue
 
-                if data.get("type") not in SHAPED_TYPES:
+                recipe_type = data.get("type")
+                if recipe_type not in SHAPED_TYPES and recipe_type not in SHAPELESS_TYPES:
                     skipped += 1
                     continue
 
@@ -288,12 +326,22 @@ def scan_jar(jar_path, station_name, tag_reg=None):
                 key     = data.get("key")
                 result  = data.get("result")
 
-                if not pattern or not key or result is None:
+                if result is None:
                     skipped += 1
                     continue
 
                 # Skip patterns that don't fit in a 3×3 crafter
-                if len(pattern) > 3 or any(len(row) > 3 for row in pattern):
+                if recipe_type in SHAPED_TYPES:
+                    if not pattern or not key:
+                        skipped += 1
+                        continue
+                else:
+                    ingredient_defs = data.get("ingredients")
+                    if not ingredient_defs or len(ingredient_defs) > 9:
+                        skipped += 1
+                        continue
+
+                if recipe_type in SHAPED_TYPES and (len(pattern) > 3 or any(len(row) > 3 for row in pattern)):
                     skipped += 1
                     continue
 
@@ -302,7 +350,10 @@ def scan_jar(jar_path, station_name, tag_reg=None):
                     skipped += 1
                     continue
 
-                ingredients, warnings = pattern_to_ingredients(pattern, key, tag_reg)
+                if recipe_type in SHAPED_TYPES:
+                    ingredients, warnings = pattern_to_ingredients(pattern, key, tag_reg)
+                else:
+                    ingredients, warnings = shapeless_to_ingredients(ingredient_defs, tag_reg)
                 if not ingredients:
                     skipped += 1
                     continue
@@ -406,7 +457,7 @@ def main():
     tag_reg.load_jars(all_jars)
     print("done.\n")
 
-    print(f"Scanning {len(jars)} JAR(s) for shaped crafting recipes...\n")
+    print(f"Scanning {len(jars)} JAR(s) for supported crafting recipes...\n")
 
     all_recipes  = []
     seen_outputs = {}   # output_item → recipe id (dedup by output)
@@ -423,7 +474,7 @@ def main():
             all_recipes.append(rec)
             added += 1
         print(f"  {jar.name}")
-        print(f"    {added} new shaped recipes  ({skip} non-shaped/skipped)")
+        print(f"    {added} new recipes  ({skip} unsupported/skipped)")
 
     # Sort alphabetically by display name
     all_recipes.sort(key=lambda r: r["name"].lower())

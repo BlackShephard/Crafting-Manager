@@ -102,9 +102,9 @@ return {
         ingredients = { {item="minecraft:iron_ingot", count=1} },
     },
     {
-        id="press_gold_sheet",    name="Gold Sheet",
+        id="press_golden_sheet",  name="Golden Sheet",
         type="press",  station="press_station",
-        output="create:gold_sheet",    output_count=1,
+        output="create:golden_sheet",  output_count=1,
         ingredients = { {item="minecraft:gold_ingot", count=1} },
     },
     {
