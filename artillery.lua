@@ -21,21 +21,11 @@ local CONFIG = {
     -- "xz" -> 0=+X, 90=+Z, 180=-X, 270=-Z
     world_yaw_mode = "mc",
 
-    -- Cannon mount setup:
-    -- "vertical"   -> cannon assembled vertically; old working setup with -90 pitch offset
-    -- "horizontal" -> cannon assembled horizontally; command solved elevation directly
-    mount_profile = "vertical",
-
     -- Command mode for cannon mount yaw:
     -- "world"         -> setTargetAngles(yaw_world, pitch)
     -- "ship_relative" -> setTargetAngles(yaw_world - heading + auto_yaw_offset, pitch)
     yaw_command_mode = "ship_relative",
     auto_yaw_offset = 270,
-
-    -- Command mode for cannon mount pitch:
-    -- "elevation"  -> command the solved elevation angle directly
-    -- "complement" -> command 90 - solved elevation, useful for some vertical mount frames
-    pitch_command_mode = "elevation",
 
     yaw_offset_deg = 0,
     pitch_offset_deg = 0,
@@ -71,26 +61,6 @@ local CANNON = {
     barrels = 6,
     chambers = 2,
     manual_effective_barrels = nil,
-}
-
-local MOUNT_PROFILES = {
-    vertical = {
-        yaw_command_mode = "ship_relative",
-        pitch_command_mode = "elevation",
-        yaw_offset_deg = 0,
-        pitch_offset_deg = -90,
-        invert_yaw = false,
-        invert_pitch = false,
-    },
-
-    horizontal = {
-        yaw_command_mode = "world",
-        pitch_command_mode = "elevation",
-        yaw_offset_deg = 0,
-        pitch_offset_deg = 0,
-        invert_yaw = false,
-        invert_pitch = false,
-    },
 }
 
 local PROJECTILES = {
@@ -510,23 +480,9 @@ local function toCommandYaw(worldYaw, shipHeading)
 end
 
 local function toCommandPitch(pitchDeg)
-    local p = pitchDeg
-    if CONFIG.pitch_command_mode == "complement" then
-        p = 90 - pitchDeg
-    end
-    if CONFIG.invert_pitch then p = -p end
+    local p = CONFIG.invert_pitch and -pitchDeg or pitchDeg
     p = p + CONFIG.pitch_offset_deg
     return clamp(p, CONFIG.min_pitch, CONFIG.max_pitch)
-end
-
-local function applyMountProfile()
-    local profile = MOUNT_PROFILES[CONFIG.mount_profile]
-    if not profile then
-        error("Unknown mount_profile: " .. tostring(CONFIG.mount_profile))
-    end
-    for key, value in pairs(profile) do
-        CONFIG[key] = value
-    end
 end
 
 local function setComputerControl(mount)
@@ -728,8 +684,6 @@ local pendingFire = false
 local running = true
 
 local function main()
-    applyMountProfile()
-
     local mount = getMount()
     setComputerControl(mount)
 
@@ -863,9 +817,7 @@ local function main()
             print("=== Artillery (Direct cannon_mount) ===")
             print(string.format("Source:%s  Arc:%s  v0:%.2f (%s)", source, arc, muzzleSpeed, speedCfg.mode))
             print(string.format("Drag  : %s", (CONFIG.drag_enabled and speedCfg.projectileMass) and "on" or "off"))
-            print(string.format("Mount : %s", CONFIG.mount_profile))
             print(string.format("Yaw mode: %s / %s", CONFIG.world_yaw_mode, CONFIG.yaw_command_mode))
-            print(string.format("Pitch mode: %s", CONFIG.pitch_command_mode))
             print(string.format("Sable off: (%.1f, %.1f, %.1f)", CONFIG.sable_offset_x, CONFIG.sable_offset_y, CONFIG.sable_offset_z))
             print(string.format("Target: (%.2f, %.2f, %.2f)", target.x, target.y, target.z))
             print(string.format("Shootr: (%.2f, %.2f, %.2f)", shooterPosNorm.x, shooterPosNorm.y, shooterPosNorm.z))
@@ -898,7 +850,7 @@ local function main()
             print(string.format("Trim  yaw/pitch: %+.2f / %+.2f  (arrows to nudge)",
                 CONFIG.yaw_offset_deg, CONFIG.pitch_offset_deg))
             print("")
-            print("F=fire A=arc T=retarget P=proj V=vel C=cal arrows=trim Q=quit")
+            print("F=fire  A=arc  T=retarget  P=proj  V=vel  C=cal  arrows=trim  Q=quit")
 
             lastTime = now
             sleep(CONFIG.update_interval_s)
