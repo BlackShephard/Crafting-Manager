@@ -283,6 +283,15 @@ local function isGenericPlanksTag(name)
         or key == "planks"
 end
 
+local function isGenericWoodenSlabsTag(name)
+    if type(name) ~= "string" then return false end
+    local key = name:gsub("^TODO:", "")
+    return key == "c:wooden_slabs"
+        or key == "o:wooden_slabs"
+        or key == "minecraft:wooden_slabs"
+        or key == "wooden_slabs"
+end
+
 local function isGenericStrippedLogTag(name)
     if type(name) ~= "string" then return false end
     local key = name:gsub("^TODO:", "")
@@ -299,6 +308,17 @@ local function isPlankItem(name)
         and (key:sub(-7) == "_planks" or key:sub(-6) == "planks")
 end
 
+local function isWoodenSlabItem(name)
+    local key = itemKey(name)
+    if type(key) ~= "string" then return false end
+    for _, r in ipairs(proc or {}) do
+        if r.route == "slab" and itemKey(r.output) == key then
+            return true
+        end
+    end
+    return false
+end
+
 local function isStrippedLogItem(name)
     local item = tostring(name):match("^[^:]+:(.+)$") or tostring(name)
     return item:match("^stripped_.+_log$") ~= nil
@@ -306,12 +326,14 @@ end
 
 local function ingredientKey(name)
     if isGenericPlanksTag(name) then return "c:planks" end
+    if isGenericWoodenSlabsTag(name) then return "c:wooden_slabs" end
     if isGenericStrippedLogTag(name) then return "c:stripped_logs" end
     return itemKey(name)
 end
 
 local function dispatchKey(name)
     if isGenericPlanksTag(name) then return "<any_planks>" end
+    if isGenericWoodenSlabsTag(name) then return "<any_wooden_slab>" end
     if isGenericStrippedLogTag(name) then return "<any_stripped_log>" end
     return itemKey(name)
 end
@@ -531,6 +553,15 @@ local function stockOf(itemName)
         end
         return total
     end
+    if isGenericWoodenSlabsTag(itemName) then
+        local total = 0
+        for _, it in ipairs(invItems) do
+            if isWoodenSlabItem(it.name) then
+                total = total + it.count
+            end
+        end
+        return total
+    end
     if isGenericStrippedLogTag(itemName) then
         local total = 0
         for _, it in ipairs(invItems) do
@@ -583,7 +614,7 @@ local function requestItems(recipe, qty)
 
     for _, item in ipairs(order) do
         local count    = needed[item]
-        local realItem = (item == "<any_planks>" or item == "<any_stripped_log>")
+        local realItem = (item == "<any_planks>" or item == "<any_wooden_slab>" or item == "<any_stripped_log>")
             and nil or resolveItem(item)
         local moved    = 0
         for slot, stack in pairs(vault.list()) do
@@ -592,6 +623,8 @@ local function requestItems(recipe, qty)
             local matches = false
             if item == "<any_planks>" then
                 matches = isPlankItem(stack.name)
+            elseif item == "<any_wooden_slab>" then
+                matches = isWoodenSlabItem(stack.name)
             elseif item == "<any_stripped_log>" then
                 matches = isStrippedLogItem(stack.name)
             else
@@ -609,6 +642,7 @@ local function requestItems(recipe, qty)
                 dispatchBarrel.pushItems(cfg.vault_name, slot)
             end
             local missingName = item == "<any_planks>" and "planks"
+                or item == "<any_wooden_slab>" and "wooden slabs"
                 or item == "<any_stripped_log>" and "stripped logs"
                 or realItem
             return false,
@@ -1019,6 +1053,30 @@ local function findRecipeFor(itemName)
         end
         for _, r in ipairs(proc) do
             if isPlankItem(r.output) then return r end
+        end
+    end
+
+    if isGenericWoodenSlabsTag(itemName) then
+        for _, r in ipairs(proc) do
+            if r.route == "slab" and isWoodenSlabItem(r.output) and stockOf(r.output) > 0 then return r end
+        end
+        for _, r in ipairs(proc) do
+            if r.route == "slab" and isWoodenSlabItem(r.output) then
+                local ing = r.ingredients and r.ingredients[1]
+                if ing and stockOf(ing.item) > 0 then return r end
+            end
+        end
+        for _, r in ipairs(proc) do
+            if r.route == "slab" and isWoodenSlabItem(r.output) then
+                local ing = r.ingredients and r.ingredients[1]
+                local stripped = ing and logSourceForPlanks(ing.item)
+                if stripped and stockOf(stripped) > 0 then return r end
+                local raw = stripped and rawSourceForStripped(stripped)
+                if raw and stockOf(raw) > 0 then return r end
+            end
+        end
+        for _, r in ipairs(proc) do
+            if r.route == "slab" and isWoodenSlabItem(r.output) then return r end
         end
     end
 
