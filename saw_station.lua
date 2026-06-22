@@ -185,6 +185,10 @@ local function routeFor(msg)
     end
 
     local output = tostring(msg.output or "")
+    local ns = output:match("^([^:]+):")
+    if ns == "burnt" or output:match(":burnt_") then
+        return nil, "burnt wood is not saw-routed as generic wood"
+    end
     local item = output:match("^[^:]+:(.+)$") or output
 
     if item:match("_hanging_sign$") then return nil, "hanging signs are not saw-routed" end
@@ -203,6 +207,7 @@ local function routeFor(msg)
     if item:match("_fence$") then return "fence" end
     if item:match("_door$") then return "door" end
     if item:match("_wood$") then return "wood" end
+    if item:match("_hyphae$") then return "wood" end
 
     return nil, "No saw route for output: " .. tostring(msg.output)
 end

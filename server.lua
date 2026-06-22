@@ -274,6 +274,16 @@ local function itemKey(name)
     return resolved:gsub("^minecraft:", ""):gsub("^create:", "")
 end
 
+local function isBurntWoodItem(name)
+    local resolved = resolveItem(name)
+    if type(resolved) ~= "string" then return false end
+    local ns, path = resolved:match("^([^:]+):(.+)$")
+    path = path or resolved
+    return ns == "burnt"
+        or resolved:find("burnt", 1, true) ~= nil
+        or path:match("^burnt_") ~= nil
+end
+
 local function isGenericPlanksTag(name)
     if type(name) ~= "string" then return false end
     local key = name:gsub("^TODO:", "")
@@ -302,13 +312,122 @@ local function isGenericStrippedLogTag(name)
         or key == "stripped_logs"
 end
 
+local WOOD_TAG_ROUTES = {
+    ["c:planks"] = "plank",
+    ["o:planks"] = "plank",
+    ["minecraft:planks"] = "plank",
+    ["planks"] = "plank",
+
+    ["c:wooden_slabs"] = "slab",
+    ["o:wooden_slabs"] = "slab",
+    ["minecraft:wooden_slabs"] = "slab",
+    ["wooden_slabs"] = "slab",
+
+    ["c:wooden_stairs"] = "stair",
+    ["o:wooden_stairs"] = "stair",
+    ["minecraft:wooden_stairs"] = "stair",
+    ["wooden_stairs"] = "stair",
+
+    ["c:wooden_doors"] = "door",
+    ["o:wooden_doors"] = "door",
+    ["minecraft:wooden_doors"] = "door",
+    ["wooden_doors"] = "door",
+
+    ["c:wooden_trapdoors"] = "trapdoor",
+    ["o:wooden_trapdoors"] = "trapdoor",
+    ["minecraft:wooden_trapdoors"] = "trapdoor",
+    ["wooden_trapdoors"] = "trapdoor",
+
+    ["c:wooden_fences"] = "fence",
+    ["o:wooden_fences"] = "fence",
+    ["minecraft:fences"] = "fence",
+    ["minecraft:wooden_fences"] = "fence",
+    ["wooden_fences"] = "fence",
+
+    ["c:fence_gates/wooden"] = "fence_gate",
+    ["c:wooden_fence_gates"] = "fence_gate",
+    ["o:wooden_fence_gates"] = "fence_gate",
+    ["minecraft:fence_gates"] = "fence_gate",
+    ["minecraft:wooden_fence_gates"] = "fence_gate",
+    ["wooden_fence_gates"] = "fence_gate",
+
+    ["c:wooden_buttons"] = "button",
+    ["o:wooden_buttons"] = "button",
+    ["minecraft:wooden_buttons"] = "button",
+    ["wooden_buttons"] = "button",
+
+    ["c:wooden_pressure_plates"] = "pressure_plate",
+    ["o:wooden_pressure_plates"] = "pressure_plate",
+    ["minecraft:wooden_pressure_plates"] = "pressure_plate",
+    ["wooden_pressure_plates"] = "pressure_plate",
+
+    ["c:wooden_signs"] = "sign",
+    ["o:wooden_signs"] = "sign",
+    ["minecraft:signs"] = "sign",
+    ["minecraft:wooden_signs"] = "sign",
+    ["wooden_signs"] = "sign",
+
+    ["c:stripped_logs"] = "stripped_log",
+    ["c:stripped_logs/wooden"] = "stripped_log",
+    ["c:stripped_wooden_logs"] = "stripped_log",
+    ["minecraft:stripped_logs"] = "stripped_log",
+    ["stripped_logs"] = "stripped_log",
+
+    ["c:stripped_wood"] = "stripped_wood",
+    ["o:stripped_wood"] = "stripped_wood",
+    ["minecraft:stripped_wood"] = "stripped_wood",
+    ["stripped_wood"] = "stripped_wood",
+
+    ["c:logs"] = "log",
+    ["o:logs"] = "log",
+    ["minecraft:logs"] = "log",
+    ["minecraft:logs_that_burn"] = "log",
+    ["logs"] = "log",
+
+    ["c:wood"] = "wood",
+    ["o:wood"] = "wood",
+    ["minecraft:wood"] = "wood",
+    ["wood"] = "wood",
+}
+
+local function genericWoodRouteForTag(name)
+    if type(name) ~= "string" then return nil end
+    local key = name:gsub("^TODO:", "")
+    return WOOD_TAG_ROUTES[key]
+end
+
 local function isPlankItem(name)
+    if isBurntWoodItem(name) then return false end
     local key = itemKey(name)
     return type(key) == "string"
         and (key:sub(-7) == "_planks" or key:sub(-6) == "planks")
 end
 
-local function isWoodenSlabItem(name)
+local isWoodenSlabItem
+
+local function isWoodRouteItem(name, route)
+    if not route or isBurntWoodItem(name) then return false end
+    if route == "plank" then return isPlankItem(name) end
+    local key = itemKey(name)
+    if type(key) ~= "string" then return false end
+    if route == "slab" then return isWoodenSlabItem(name) end
+    if route == "stair" then return key:match("_stairs$") ~= nil end
+    if route == "door" then return key:match("_door$") ~= nil and not key:match("_trapdoor$") end
+    if route == "trapdoor" then return key:match("_trapdoor$") ~= nil end
+    if route == "fence" then return key:match("_fence$") ~= nil and not key:match("_fence_gate$") end
+    if route == "fence_gate" then return key:match("_fence_gate$") ~= nil end
+    if route == "button" then return key:match("_button$") ~= nil end
+    if route == "pressure_plate" then return key:match("_pressure_plate$") ~= nil end
+    if route == "sign" then return key:match("_sign$") ~= nil and not key:match("_hanging_sign$") end
+    if route == "stripped_log" then return key:match("^stripped_.+_log$") ~= nil or key:match("^stripped_.+_stem$") ~= nil end
+    if route == "stripped_wood" then return key:match("^stripped_.+_wood$") ~= nil or key:match("^stripped_.+_hyphae$") ~= nil end
+    if route == "log" then return (key:match("_log$") ~= nil or key:match("_stem$") ~= nil) and not key:match("^stripped_") end
+    if route == "wood" then return (key:match("_wood$") ~= nil or key:match("_hyphae$") ~= nil) and not key:match("^stripped_") end
+    return false
+end
+
+isWoodenSlabItem = function(name)
+    if isBurntWoodItem(name) then return false end
     local key = itemKey(name)
     if type(key) ~= "string" then return false end
     for _, r in ipairs(proc or {}) do
@@ -320,21 +439,20 @@ local function isWoodenSlabItem(name)
 end
 
 local function isStrippedLogItem(name)
+    if isBurntWoodItem(name) then return false end
     local item = tostring(name):match("^[^:]+:(.+)$") or tostring(name)
     return item:match("^stripped_.+_log$") ~= nil
 end
 
 local function ingredientKey(name)
-    if isGenericPlanksTag(name) then return "c:planks" end
-    if isGenericWoodenSlabsTag(name) then return "c:wooden_slabs" end
-    if isGenericStrippedLogTag(name) then return "c:stripped_logs" end
+    local woodRoute = genericWoodRouteForTag(name)
+    if woodRoute then return "wood:" .. woodRoute end
     return itemKey(name)
 end
 
 local function dispatchKey(name)
-    if isGenericPlanksTag(name) then return "<any_planks>" end
-    if isGenericWoodenSlabsTag(name) then return "<any_wooden_slab>" end
-    if isGenericStrippedLogTag(name) then return "<any_stripped_log>" end
+    local woodRoute = genericWoodRouteForTag(name)
+    if woodRoute then return "<wood:" .. woodRoute .. ">" end
     return itemKey(name)
 end
 
@@ -367,6 +485,7 @@ end
 
 local function inferSawRoute(output)
     if type(output) ~= "string" then return nil end
+    if isBurntWoodItem(output) then return nil end
     local item = output:match("^[^:]+:(.+)$") or output
 
     if item:match("_hanging_sign$") then return nil end
@@ -385,6 +504,7 @@ local function inferSawRoute(output)
     if item:match("_fence$") then return "fence" end
     if item:match("_door$") then return "door" end
     if item:match("_wood$") then return "wood" end
+    if item:match("_hyphae$") then return "wood" end
 
     return nil
 end
@@ -544,28 +664,14 @@ proc = filterValidRecipes(proc)
 addGeneratedSawRecipes()
 
 local function stockOf(itemName)
-    if isGenericPlanksTag(itemName) then
-        local total = 0
-        for _, it in ipairs(invItems) do
-            if isPlankItem(it.name) then
-                total = total + it.count
-            end
-        end
-        return total
+    local woodRoute = genericWoodRouteForTag(itemName)
+    if type(itemName) == "string" and not woodRoute then
+        woodRoute = itemName:match("^wood:(.+)$")
     end
-    if isGenericWoodenSlabsTag(itemName) then
+    if woodRoute then
         local total = 0
         for _, it in ipairs(invItems) do
-            if isWoodenSlabItem(it.name) then
-                total = total + it.count
-            end
-        end
-        return total
-    end
-    if isGenericStrippedLogTag(itemName) then
-        local total = 0
-        for _, it in ipairs(invItems) do
-            if isStrippedLogItem(it.name) then
+            if isWoodRouteItem(it.name, woodRoute) then
                 total = total + it.count
             end
         end
@@ -614,19 +720,24 @@ local function requestItems(recipe, qty)
 
     for _, item in ipairs(order) do
         local count    = needed[item]
-        local realItem = (item == "<any_planks>" or item == "<any_wooden_slab>" or item == "<any_stripped_log>")
-            and nil or resolveItem(item)
+        local woodRoute = type(item) == "string" and item:match("^<wood:(.+)>$") or nil
+        local realItem = woodRoute and nil or resolveItem(item)
         local moved    = 0
+        local warnedBurnt = false
         for slot, stack in pairs(vault.list()) do
             if moved >= count then break end
             local stackKey = itemKey(stack.name)
             local matches = false
-            if item == "<any_planks>" then
-                matches = isPlankItem(stack.name)
-            elseif item == "<any_wooden_slab>" then
-                matches = isWoodenSlabItem(stack.name)
-            elseif item == "<any_stripped_log>" then
-                matches = isStrippedLogItem(stack.name)
+            if woodRoute then
+                if isBurntWoodItem(stack.name) then
+                    if not warnedBurnt then
+                        print(("[WARN] Skipping burnt wood for <%s>: %s"):format(
+                            woodRoute, tostring(stack.name)))
+                        warnedBurnt = true
+                    end
+                else
+                    matches = isWoodRouteItem(stack.name, woodRoute)
+                end
             else
                 matches = stackKey == itemKey(realItem)
             end
@@ -641,10 +752,7 @@ local function requestItems(recipe, qty)
             for slot in pairs(dispatchBarrel.list()) do
                 dispatchBarrel.pushItems(cfg.vault_name, slot)
             end
-            local missingName = item == "<any_planks>" and "planks"
-                or item == "<any_wooden_slab>" and "wooden slabs"
-                or item == "<any_stripped_log>" and "stripped logs"
-                or realItem
+            local missingName = woodRoute and ("wood " .. woodRoute) or realItem
             return false,
                 ("Not enough %s: need %d, have %d"):format(missingName, count, moved)
         end
@@ -1162,7 +1270,26 @@ end
 -- Find the first recipe that outputs itemName. Processing recipes are preferred
 -- because they encode explicit station routing for things like sheets and saw cuts.
 local function findRecipeFor(itemName)
-    if isGenericPlanksTag(itemName) then
+    local genericRoute = genericWoodRouteForTag(itemName)
+    if type(itemName) == "string" and not genericRoute then
+        genericRoute = itemName:match("^wood:(.+)$")
+    end
+    if genericRoute and genericRoute ~= "plank" and genericRoute ~= "slab" and genericRoute ~= "stripped_log" then
+        for _, r in ipairs(proc) do
+            if r.route == genericRoute and isWoodRouteItem(r.output, genericRoute) and stockOf(r.output) > 0 then return r end
+        end
+        for _, r in ipairs(proc) do
+            if r.route == genericRoute and isWoodRouteItem(r.output, genericRoute) then
+                local ing = r.ingredients and r.ingredients[1]
+                if ing and stockOf(ing.item) > 0 then return r end
+            end
+        end
+        for _, r in ipairs(proc) do
+            if r.route == genericRoute and isWoodRouteItem(r.output, genericRoute) then return r end
+        end
+    end
+
+    if isGenericPlanksTag(itemName) or genericRoute == "plank" then
         for _, r in ipairs(proc) do
             if isPlankItem(r.output) and stockOf(r.output) > 0 then return r end
         end
@@ -1184,7 +1311,7 @@ local function findRecipeFor(itemName)
         end
     end
 
-    if isGenericWoodenSlabsTag(itemName) then
+    if isGenericWoodenSlabsTag(itemName) or genericRoute == "slab" then
         for _, r in ipairs(proc) do
             if r.route == "slab" and isWoodenSlabItem(r.output) and stockOf(r.output) > 0 then return r end
         end
@@ -1208,7 +1335,7 @@ local function findRecipeFor(itemName)
         end
     end
 
-    if isGenericStrippedLogTag(itemName) then
+    if isGenericStrippedLogTag(itemName) or genericRoute == "stripped_log" then
         for _, r in ipairs(proc) do
             if isStrippedLogItem(r.output) then
                 local ing = r.ingredients and r.ingredients[1]
