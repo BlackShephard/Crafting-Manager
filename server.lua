@@ -759,7 +759,7 @@ local function dispatchToAddress(address, recipe, qty)
     return ok, err
 end
 
-local function dispatchCraft(rec, qty)
+local function dispatchCraft(rec, qty, attempts)
     local stName, sid = findFreeStation(rec.station, "crafting")
     if not stName then
         ui.status = "ERROR: no crafting station online"
@@ -788,6 +788,8 @@ local function dispatchCraft(rec, qty)
         stationName = stName,
         startStock = startStock,
         expectedOutput = expectedOutput,
+        startedAt = os.epoch("utc"),
+        attempts = attempts or 0,
     }
 
     rednet.send(sid, {
@@ -806,7 +808,7 @@ end
 
 -- Processing stations receive the ingredient package through Create logistics,
 -- then send output home only after the requested item count is complete.
-local function dispatchProcess(rec, qty)
+local function dispatchProcess(rec, qty, attempts)
     local stName, sid = findFreeStation(rec.station, "processing")
     if not stName then
         ui.status = "ERROR: processing station offline: " .. tostring(rec.station)
@@ -833,6 +835,8 @@ local function dispatchProcess(rec, qty)
         stationName = stName,
         startStock = startStock,
         expectedOutput = expected,
+        startedAt = os.epoch("utc"),
+        attempts = attempts or 0,
     }
     rednet.send(sid, {
         type         = "PROCESS_REQUEST",
@@ -852,6 +856,47 @@ local function dispatchProcess(rec, qty)
     ui.status = ("[%s] Sent: %s x%d -> %s  (%d free%s)"):format(
         typeLabel, rec.name, expected, stName, freeN, qStr)
     return true
+end
+
+local function pendingTimeoutFor(job)
+    local base = cfg.pending_job_timeout or 180
+    local perCraft = cfg.pending_job_timeout_per_craft or 90
+    return math.max(base, (job.qty or 1) * perCraft)
+end
+
+local function checkPendingTimeouts()
+    local now = os.epoch("utc")
+    local maxRetries = cfg.pending_job_retries or 2
+
+    for id, job in pairs(pending) do
+        local started = job.startedAt or now
+        local timeoutMs = pendingTimeoutFor(job) * 1000
+        if now - started >= timeoutMs then
+            pending[id] = nil
+            if stations[job.stationName] then
+                stations[job.stationName].busy = false
+            end
+
+            scanVault()
+            local target = (job.startStock or 0) + (job.expectedOutput or 0)
+            local output = job.recipe and job.recipe.output
+            if output and target > 0 and stockOf(output) >= target then
+                ui.status = ("Recovered: %s arrived after timeout via %s"):format(
+                    job.recipe.name, job.stationName)
+            elseif (job.attempts or 0) < maxRetries then
+                table.insert(queue, 1, {
+                    rec = job.recipe,
+                    qty = job.qty,
+                    attempts = (job.attempts or 0) + 1,
+                })
+                ui.status = ("Retrying timed-out job: %s x%d (%d/%d)"):format(
+                    job.recipe.name, job.qty, (job.attempts or 0) + 1, maxRetries)
+            else
+                ui.status = ("FAILED after retries: %s x%d via %s"):format(
+                    job.recipe.name, job.qty, job.stationName)
+            end
+        end
+    end
 end
 
 local buildCraftPlan
@@ -883,7 +928,7 @@ local function tryDispatchNext()
             if not findFreeStation(job.rec.station, "processing") then
                 i = i + 1
             else
-                local ok = dispatchProcess(job.rec, job.qty)
+                local ok = dispatchProcess(job.rec, job.qty, job.attempts)
                 if ok then
                     table.remove(queue, i)
                     if ui.queueSel >= i then
@@ -900,7 +945,7 @@ local function tryDispatchNext()
             if not stName then
                 i = i + 1  -- no station free; skip for now
             else
-                local ok = dispatchCraft(job.rec, job.qty)
+                local ok = dispatchCraft(job.rec, job.qty, job.attempts)
                 if ok then
                     table.remove(queue, i)
                     if ui.queueSel >= i then
@@ -2104,6 +2149,7 @@ while true do
 
     elseif ev[1] == "timer" and ev[2] == refreshTimer then
         scanVault()
+        checkPendingTimeouts()
         checkMinStock()
         tryDispatchNext()
         drawUI()
