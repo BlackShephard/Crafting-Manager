@@ -11,14 +11,10 @@ local PROJECTILES = {
     he = {
         name = "HE Shell",
         mass = 3519.5,
-        charge_multiplier = 1.0,
     },
     shell_holder_mk5 = {
         name = "Shell Holder MkV",
         mass = 3519.5,
-        -- Matched from Going Ballistic launch debug:
-        -- raw chargeEquivalent 4.0 -> launch chargeEquivalent 3.3674774169921875
-        charge_multiplier = 0.8418693542480469,
     },
 }
 
@@ -29,6 +25,9 @@ local defaults = {
     unrifled_barrels = 0,
     chambers = 2,
     rifled_velocity_multiplier = 0.985,
+    -- Matched from Going Ballistic launch debug:
+    -- raw chargeEquivalent 4.0 -> launch chargeEquivalent 3.3674774169921875
+    launch_charge_multiplier = 0.8418693542480469,
     expected_velocity = 172.5386601850819,
 }
 
@@ -43,6 +42,9 @@ local aliases = {
     chambers = "chambers",
     chamber = "chambers",
     rifled_mult = "rifled_velocity_multiplier",
+    launch_charge_mult = "launch_charge_multiplier",
+    launch_mult = "launch_charge_multiplier",
+    charge_mult = "launch_charge_multiplier",
     expected = "expected_velocity",
 }
 
@@ -107,7 +109,7 @@ local function main()
         error("Unknown projectile: " .. tostring(cfg.projectile))
     end
 
-    local launchChargeEq = cfg.raw_charge_equivalent * projectile.charge_multiplier
+    local launchChargeEq = cfg.raw_charge_equivalent * cfg.launch_charge_multiplier
     local barrelLength = cfg.rifled_barrels + cfg.unrifled_barrels + cfg.chambers
     local cannonVelocityMultiplier = cfg.rifled_velocity_multiplier ^ cfg.rifled_barrels
 
@@ -135,7 +137,7 @@ local function main()
     print(string.format("Projectile: %s", projectile.name))
     print(string.format("Mass: %.12f kg", projectile.mass))
     print(string.format("Raw charge equivalent: %.12f", cfg.raw_charge_equivalent))
-    print(string.format("Projectile charge multiplier: %.15f", projectile.charge_multiplier))
+    print(string.format("Launch charge multiplier: %.15f", cfg.launch_charge_multiplier))
     print(string.format("Launch charge equivalent: %.15f", launchChargeEq))
     print(string.format("Powder mass: %.12f kg", rawInfo.powder_mass))
     print(string.format("Rifled barrels: %.0f", cfg.rifled_barrels))

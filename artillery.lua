@@ -60,6 +60,9 @@ local CANNON = {
     rifled_barrels = 6,
     unrifled_barrels = 0,
     chambers = 2,
+    -- Going Ballistic launch logs show chargeEquivalent 4.0 becoming
+    -- 3.3674774169921875 at launch for this cannon/load setup.
+    launch_charge_multiplier = 0.8418693542480469,
     -- CBC_AT rifled barrels have velocity_multiplier=0.985 per rifled barrel.
     -- Plain/unrifled barrels use 1.0 and only add length.
     rifled_velocity_multiplier = 0.985,
@@ -72,8 +75,7 @@ local PROJECTILES = {
     {name = "Shrapnel Shell",   mass = 3410.6},
     {name = "AP Shell",         mass = 3159.9},
     {name = "HE Shell",         mass = 3519.5},
-    -- Debug showed chargePower 8.0 reducing to launch chargeEquivalent 3.3674774169921875.
-    {name = "Shell Holder MkV",  mass = 3519.5, charge_multiplier = 0.8418693542480469},
+    {name = "Shell Holder MkV",  mass = 3519.5},
     {name = "Fluid Shell",      mass = 2400.0},
     {name = "Drop Mortar Shell", mass = 2255.5},
     {name = "Mortar Stone",     mass = 1162.3},
@@ -508,20 +510,18 @@ local function chooseProjectileMass()
     print("  2) Custom")
     local mode = readNumber("Mode [1/2] (default 1): ", 1)
     if mode == 2 then
-        return readNumber("Mass (kg): ", 2922.4), "Custom", 1.0, 1.0, 1.0
+        return readNumber("Mass (kg): ", 2922.4), "Custom", 1.0, 1.0
     end
     for i, p in ipairs(PROJECTILES) do
         local dragText = p.drag_multiplier and string.format(" drag x%.2f", p.drag_multiplier) or ""
         local velText = p.velocity_multiplier and string.format(" vel x%.2f", p.velocity_multiplier) or ""
-        local chargeText = p.charge_multiplier and string.format(" charge x%.3f", p.charge_multiplier) or ""
-        print(string.format("  %2d) %-18s %.1f kg%s%s%s", i, p.name, p.mass, velText, dragText, chargeText))
+        print(string.format("  %2d) %-18s %.1f kg%s%s", i, p.name, p.mass, velText, dragText))
     end
     local idx = math.floor(clamp(readNumber("Select [5=HE Shell]: ", 5), 1, #PROJECTILES))
     return PROJECTILES[idx].mass,
         PROJECTILES[idx].name,
         PROJECTILES[idx].drag_multiplier or 1.0,
-        PROJECTILES[idx].velocity_multiplier or 1.0,
-        PROJECTILES[idx].charge_multiplier or 1.0
+        PROJECTILES[idx].velocity_multiplier or 1.0
 end
 
 local CHARGE_TYPES = {
@@ -577,7 +577,7 @@ local function chooseMuzzleVelocity()
             projectileMass = nil,
             dragMultiplier = nil,
             projectileVelocityMultiplier = nil,
-            chargeMultiplier = nil,
+            launchChargeMultiplier = nil,
             rawChargeEq = nil,
             chargeEq = nil,
             chargeMeters = nil,
@@ -586,9 +586,10 @@ local function chooseMuzzleVelocity()
         }
     end
 
-    local projMass, projName, projDragMult, projVelMult, projChargeMult = chooseProjectileMass()
+    local projMass, projName, projDragMult, projVelMult = chooseProjectileMass()
     local chargeEq, chargeMeters = chooseChargeLoad()
-    local launchChargeEq = chargeEq * projChargeMult
+    local launchChargeMult = CANNON.launch_charge_multiplier or 1.0
+    local launchChargeEq = chargeEq * launchChargeMult
     local eff, effMode = calcEffectiveBarrels()
     local cannonVelMult = calcCannonVelocityMultiplier()
 
@@ -599,8 +600,8 @@ local function chooseMuzzleVelocity()
         tostring(CANNON.chambers)
     ))
     print(string.format("Mounted barrel length (%s): %.2f m", effMode, eff))
-    if projChargeMult ~= 1.0 then
-        print(string.format("Launch charge: %.3f eq (raw %.3f x %.3f)", launchChargeEq, chargeEq, projChargeMult))
+    if launchChargeMult ~= 1.0 then
+        print(string.format("Launch charge: %.3f eq (raw %.3f x %.3f)", launchChargeEq, chargeEq, launchChargeMult))
     end
     if cannonVelMult ~= 1.0 then
         print(string.format("Cannon velocity multiplier: %.3f", cannonVelMult))
@@ -630,7 +631,7 @@ local function chooseMuzzleVelocity()
             projectileMass = projMass,
             dragMultiplier = projDragMult,
             projectileVelocityMultiplier = projVelMult,
-            chargeMultiplier = projChargeMult,
+            launchChargeMultiplier = launchChargeMult,
             rawChargeEq = chargeEq,
             chargeEq = launchChargeEq,
             chargeMeters = chargeMeters,
@@ -652,7 +653,7 @@ local function chooseMuzzleVelocity()
         projectileMass = projMass,
         dragMultiplier = projDragMult,
         projectileVelocityMultiplier = projVelMult,
-        chargeMultiplier = projChargeMult,
+        launchChargeMultiplier = launchChargeMult,
         rawChargeEq = chargeEq,
         chargeEq = launchChargeEq,
         chargeMeters = chargeMeters,
@@ -689,8 +690,8 @@ local function quickChangeProjectile(speedCfg)
         return nil
     end
 
-    local newMass, newName, newDragMult, newVelMult, newChargeMult = chooseProjectileMass()
-    local launchChargeEq = (speedCfg.rawChargeEq or speedCfg.chargeEq) * newChargeMult
+    local newMass, newName, newDragMult, newVelMult = chooseProjectileMass()
+    local launchChargeEq = (speedCfg.rawChargeEq or speedCfg.chargeEq) * (speedCfg.launchChargeMultiplier or 1.0)
     local v0, err = calcMuzzleVelocity(
         launchChargeEq,
         speedCfg.mountedLength,
@@ -707,7 +708,6 @@ local function quickChangeProjectile(speedCfg)
     speedCfg.projectileName = newName
     speedCfg.dragMultiplier = newDragMult
     speedCfg.projectileVelocityMultiplier = newVelMult
-    speedCfg.chargeMultiplier = newChargeMult
     speedCfg.chargeEq = launchChargeEq
     speedCfg.velMult = (speedCfg.userVelMult or 1.0) * newVelMult * (speedCfg.cannonVelocityMultiplier or 1.0)
     return v0
@@ -862,8 +862,8 @@ local function main()
                     if speedCfg.projectileVelocityMultiplier and speedCfg.projectileVelocityMultiplier ~= 1.0 then
                         print(string.format("Vel x : %.2f", speedCfg.projectileVelocityMultiplier))
                     end
-                    if speedCfg.chargeMultiplier and speedCfg.chargeMultiplier ~= 1.0 then
-                        print(string.format("Chg x : %.3f", speedCfg.chargeMultiplier))
+                    if speedCfg.launchChargeMultiplier and speedCfg.launchChargeMultiplier ~= 1.0 then
+                        print(string.format("Chg x : %.3f", speedCfg.launchChargeMultiplier))
                     end
                     if speedCfg.cannonVelocityMultiplier and speedCfg.cannonVelocityMultiplier ~= 1.0 then
                         print(string.format("Gun x : %.3f", speedCfg.cannonVelocityMultiplier))
