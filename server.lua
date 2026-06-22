@@ -637,6 +637,26 @@ local pending  = {}
 local nextID   = 1
 local queue    = {}   -- { rec, qty }
 
+local function findPendingForStation(stationName)
+    for id, job in pairs(pending) do
+        if job.stationName == stationName then
+            return id, job
+        end
+    end
+    return nil, nil
+end
+
+local function clearPendingForStation(stationName)
+    local cleared = 0
+    for id, job in pairs(pending) do
+        if job.stationName == stationName then
+            pending[id] = nil
+            cleared = cleared + 1
+        end
+    end
+    return cleared
+end
+
 local function stationMatches(st, stationType)
     if not stationType then return true end
     return (st.stationType or "crafting") == stationType
@@ -1909,17 +1929,30 @@ local function handleMsg(sid, msg)
     if msg.type == "HELLO" then
         local wasBusy = stations[msg.station_name]
                         and stations[msg.station_name].busy or false
+        local staleJobId, staleJob = nil, nil
+        if wasBusy then
+            staleJobId, staleJob = findPendingForStation(msg.station_name)
+            clearPendingForStation(msg.station_name)
+        end
         stations[msg.station_name] = {
             id = sid,
-            busy = wasBusy,
+            busy = false,
             stationType = msg.station_type or "crafting",
             address = msg.station_address or msg.station_name,
         }
         rednet.send(sid, { type = "ACK" }, PROTO)
-        ui.status = ("%s station '%s' registered (ID:%d)"):format(
-            stations[msg.station_name].stationType,
-            tostring(msg.station_name),
-            sid)
+        if wasBusy then
+            local staleName = staleJob and staleJob.recipe and staleJob.recipe.name
+                or ("request " .. tostring(staleJobId or "?"))
+            ui.status = ("%s re-registered idle; cleared stale busy job: %s"):format(
+                tostring(msg.station_name), staleName)
+            scanVault()
+        else
+            ui.status = ("%s station '%s' registered (ID:%d)"):format(
+                stations[msg.station_name].stationType,
+                tostring(msg.station_name),
+                sid)
+        end
         tryDispatchNext()
 
     elseif msg.type == "DONE" then
