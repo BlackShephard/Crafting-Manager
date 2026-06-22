@@ -1,7 +1,7 @@
 -- Desktop Lua test harness for artillery.lua interior-ballistics math.
 -- Run with:
 --   lua artillery_velocity_test.lua
---   lua artillery_velocity_test.lua projectile=he charge=4 rifled=6 unrifled=0 chambers=2
+--   lua artillery_velocity_test.lua projectile=he charge_power=6.734955 rifled=6 unrifled=0 chambers=2
 
 local ROBINS_K = 606.8568
 local POWDER_MASS = 121.593455168150
@@ -19,32 +19,30 @@ local PROJECTILES = {
 }
 
 local defaults = {
-    projectile = "shell_holder_mk5",
-    raw_charge_equivalent = 4.0,
+    projectile = "he",
+    launch_charge_power = 6.734955,
     rifled_barrels = 6,
     unrifled_barrels = 0,
     chambers = 2,
     rifled_velocity_multiplier = 0.985,
-    -- Matched from Going Ballistic launch debug:
-    -- raw chargeEquivalent 4.0 -> launch chargeEquivalent 3.3674774169921875
-    launch_charge_multiplier = 0.8418693542480469,
+    -- Matched from Going Ballistic launch debug for 6 rifled barrels,
+    -- 2 chambers, full big cartridge. The mod uses chargePower / 2
+    -- as the chargeEquivalent in the Robins calculation.
     expected_velocity = 172.5386601850819,
 }
 
 local aliases = {
     projectile = "projectile",
     proj = "projectile",
-    charge = "raw_charge_equivalent",
-    raw_charge = "raw_charge_equivalent",
-    charge_equivalent = "raw_charge_equivalent",
+    charge = "launch_charge_power",
+    charge_power = "launch_charge_power",
+    launch_power = "launch_charge_power",
+    power = "launch_charge_power",
     rifled = "rifled_barrels",
     unrifled = "unrifled_barrels",
     chambers = "chambers",
     chamber = "chambers",
     rifled_mult = "rifled_velocity_multiplier",
-    launch_charge_mult = "launch_charge_multiplier",
-    launch_mult = "launch_charge_multiplier",
-    charge_mult = "launch_charge_multiplier",
     expected = "expected_velocity",
 }
 
@@ -109,7 +107,7 @@ local function main()
         error("Unknown projectile: " .. tostring(cfg.projectile))
     end
 
-    local launchChargeEq = cfg.raw_charge_equivalent * cfg.launch_charge_multiplier
+    local launchChargeEq = cfg.launch_charge_power / 2.0
     local barrelLength = cfg.rifled_barrels + cfg.unrifled_barrels + cfg.chambers
     local cannonVelocityMultiplier = cfg.rifled_velocity_multiplier ^ cfg.rifled_barrels
 
@@ -136,8 +134,7 @@ local function main()
     print("=== Artillery Velocity Test ===")
     print(string.format("Projectile: %s", projectile.name))
     print(string.format("Mass: %.12f kg", projectile.mass))
-    print(string.format("Raw charge equivalent: %.12f", cfg.raw_charge_equivalent))
-    print(string.format("Launch charge multiplier: %.15f", cfg.launch_charge_multiplier))
+    print(string.format("Launch chargePower: %.12f", cfg.launch_charge_power))
     print(string.format("Launch charge equivalent: %.15f", launchChargeEq))
     print(string.format("Powder mass: %.12f kg", rawInfo.powder_mass))
     print(string.format("Rifled barrels: %.0f", cfg.rifled_barrels))

@@ -60,9 +60,10 @@ local CANNON = {
     rifled_barrels = 6,
     unrifled_barrels = 0,
     chambers = 2,
-    -- Going Ballistic launch logs show chargeEquivalent 4.0 becoming
-    -- 3.3674774169921875 at launch for this cannon/load setup.
-    launch_charge_multiplier = 0.8418693542480469,
+    -- Full big cartridge raw charge power. Going Ballistic launch logs may show
+    -- a lower effective chargePower for a specific cannon profile; known tested
+    -- profiles are listed in CARTRIDGE_LAUNCH_POWER_BY_PROFILE below.
+    full_cartridge_power = 8.0,
     -- CBC_AT rifled barrels have velocity_multiplier=0.985 per rifled barrel.
     -- Plain/unrifled barrels use 1.0 and only add length.
     rifled_velocity_multiplier = 0.985,
@@ -525,42 +526,76 @@ local function chooseProjectileMass()
 end
 
 local CHARGE_TYPES = {
-    {name = "Standard",          equiv_per_slot = 1.00},
-    {name = "Enhanced Mk1",      equiv_per_slot = 1.25},
-    {name = "Enhanced Mk2",      equiv_per_slot = 1.50},
-    {name = "Enhanced Mk3",      equiv_per_slot = 1.75},
-    {name = "Enhanced Mk4",      equiv_per_slot = 2.00},
-    {name = "Enhanced Mk5",      equiv_per_slot = 2.25},
-    {name = "Custom (manual)",   equiv_per_slot = nil },
+    {name = "Full big cartridge", raw_power = 8.00, cartridge = true},
+    {name = "Powder charge",      raw_power = 2.00},
+    {name = "Powder charge Mk1",  raw_power = 2.50},
+    {name = "Powder charge Mk2",  raw_power = 3.00},
+    {name = "Powder charge Mk3",  raw_power = 3.50},
+    {name = "Powder charge Mk4",  raw_power = 4.00},
+    {name = "Powder charge Mk5",  raw_power = 4.50},
+    {name = "Custom launch power", raw_power = nil},
 }
+
+local CARTRIDGE_LAUNCH_POWER_BY_PROFILE = {
+    -- key is rifled/unrifled/chambers. Values are Going Ballistic launch
+    -- chargePower readings from debug logs, before chargePower / 2.
+    ["5/0/2"] = 7.0409317,
+    ["6/0/2"] = 6.734955,
+    ["7/0/2"] = 6.4161873,
+    ["0/6/2"] = 6.8969536,
+}
+
+local function cannonProfileKey()
+    return string.format(
+        "%d/%d/%d",
+        math.floor(CANNON.rifled_barrels or 0),
+        math.floor(CANNON.unrifled_barrels or 0),
+        math.floor(CANNON.chambers or 0)
+    )
+end
 
 local function chooseChargeLoad()
     print("")
     print("Charge type:")
     for i, c in ipairs(CHARGE_TYPES) do
-        if c.equiv_per_slot then
-            print(string.format("  %d) %-20s (%.2f eq/slot)", i, c.name, c.equiv_per_slot))
+        if c.raw_power then
+            print(string.format("  %d) %-20s (%.2f raw power)", i, c.name, c.raw_power))
         else
             print(string.format("  %d) %s", i, c.name))
         end
     end
-    local idx = math.floor(clamp(readNumber("Type [1=Standard]: ", 1), 1, #CHARGE_TYPES))
+    local idx = math.floor(clamp(readNumber("Type [1=Full cartridge]: ", 1), 1, #CHARGE_TYPES))
     local ct = CHARGE_TYPES[idx]
 
-    local slots = math.floor(readNumber("Number of charges loaded: ", 1))
-
-    local equivPerSlot
-    if ct.equiv_per_slot then
-        equivPerSlot = ct.equiv_per_slot
+    local rawPower
+    local count = 1
+    local estimated = false
+    if ct.cartridge then
+        local profileKey = cannonProfileKey()
+        rawPower = CARTRIDGE_LAUNCH_POWER_BY_PROFILE[profileKey]
+        if not rawPower then
+            rawPower = ct.raw_power or CANNON.full_cartridge_power or 8.0
+            estimated = true
+        end
+        print(string.format("  -> cartridge profile %s chargePower %.6f%s",
+            profileKey,
+            rawPower,
+            estimated and " (estimated)" or ""
+        ))
+    elseif ct.raw_power then
+        count = math.floor(readNumber("Number of charges loaded: ", 1))
+        rawPower = count * ct.raw_power
     else
-        equivPerSlot = readNumber("Charge equivalents per charge: ", 1.0)
+        rawPower = readNumber("Launch chargePower from debug log: ", 6.734955)
     end
 
-    local chargeEq = slots * equivPerSlot
-    local chargeMeters = slots * CHARGE_LENGTH
-    print(string.format("  -> %d x %.2f eq = %.3f total equiv", slots, equivPerSlot, chargeEq))
-    print(string.format("  -> %.2f m loaded charge length", chargeMeters))
-    return chargeEq, chargeMeters
+    local launchChargeEq = rawPower / 2.0
+    local chargeMeters = launchChargeEq * CHARGE_LENGTH
+    if not ct.cartridge and ct.raw_power then
+        print(string.format("  -> %d x %.2f raw power = %.6f chargePower", count, ct.raw_power, rawPower))
+    end
+    print(string.format("  -> %.6f launch chargeEquivalent", launchChargeEq))
+    return rawPower, launchChargeEq, chargeMeters, ct.name, estimated
 end
 
 local function chooseMuzzleVelocity()
@@ -577,8 +612,8 @@ local function chooseMuzzleVelocity()
             projectileMass = nil,
             dragMultiplier = nil,
             projectileVelocityMultiplier = nil,
-            launchChargeMultiplier = nil,
-            rawChargeEq = nil,
+            launchChargePower = nil,
+            rawChargePower = nil,
             chargeEq = nil,
             chargeMeters = nil,
             mountedLength = nil,
@@ -587,9 +622,7 @@ local function chooseMuzzleVelocity()
     end
 
     local projMass, projName, projDragMult, projVelMult = chooseProjectileMass()
-    local chargeEq, chargeMeters = chooseChargeLoad()
-    local launchChargeMult = CANNON.launch_charge_multiplier or 1.0
-    local launchChargeEq = chargeEq * launchChargeMult
+    local launchChargePower, launchChargeEq, chargeMeters, chargeLabel, chargeEstimated = chooseChargeLoad()
     local eff, effMode = calcEffectiveBarrels()
     local cannonVelMult = calcCannonVelocityMultiplier()
 
@@ -600,9 +633,8 @@ local function chooseMuzzleVelocity()
         tostring(CANNON.chambers)
     ))
     print(string.format("Mounted barrel length (%s): %.2f m", effMode, eff))
-    if launchChargeMult ~= 1.0 then
-        print(string.format("Launch charge: %.3f eq (raw %.3f x %.3f)", launchChargeEq, chargeEq, launchChargeMult))
-    end
+    print(string.format("Launch chargePower: %.6f -> %.6f equivalent", launchChargePower, launchChargeEq))
+    if chargeEstimated then print("Launch chargePower is estimated for this cannon profile.") end
     if cannonVelMult ~= 1.0 then
         print(string.format("Cannon velocity multiplier: %.3f", cannonVelMult))
     end
@@ -631,9 +663,11 @@ local function chooseMuzzleVelocity()
             projectileMass = projMass,
             dragMultiplier = projDragMult,
             projectileVelocityMultiplier = projVelMult,
-            launchChargeMultiplier = launchChargeMult,
-            rawChargeEq = chargeEq,
+            launchChargePower = launchChargePower,
+            rawChargePower = launchChargePower,
             chargeEq = launchChargeEq,
+            chargeLabel = chargeLabel,
+            chargeEstimated = chargeEstimated,
             chargeMeters = chargeMeters,
             mountedLength = barrelBlocks,
             cannonVelocityMultiplier = cannonVelMult,
@@ -653,9 +687,11 @@ local function chooseMuzzleVelocity()
         projectileMass = projMass,
         dragMultiplier = projDragMult,
         projectileVelocityMultiplier = projVelMult,
-        launchChargeMultiplier = launchChargeMult,
-        rawChargeEq = chargeEq,
+        launchChargePower = launchChargePower,
+        rawChargePower = launchChargePower,
         chargeEq = launchChargeEq,
+        chargeLabel = chargeLabel,
+        chargeEstimated = chargeEstimated,
         chargeMeters = chargeMeters,
         mountedLength = barrelBlocks,
         cannonVelocityMultiplier = cannonVelMult,
@@ -691,7 +727,7 @@ local function quickChangeProjectile(speedCfg)
     end
 
     local newMass, newName, newDragMult, newVelMult = chooseProjectileMass()
-    local launchChargeEq = (speedCfg.rawChargeEq or speedCfg.chargeEq) * (speedCfg.launchChargeMultiplier or 1.0)
+    local launchChargeEq = speedCfg.chargeEq or ((speedCfg.launchChargePower or 0) / 2.0)
     local v0, err = calcMuzzleVelocity(
         launchChargeEq,
         speedCfg.mountedLength,
@@ -862,8 +898,8 @@ local function main()
                     if speedCfg.projectileVelocityMultiplier and speedCfg.projectileVelocityMultiplier ~= 1.0 then
                         print(string.format("Vel x : %.2f", speedCfg.projectileVelocityMultiplier))
                     end
-                    if speedCfg.launchChargeMultiplier and speedCfg.launchChargeMultiplier ~= 1.0 then
-                        print(string.format("Chg x : %.3f", speedCfg.launchChargeMultiplier))
+                    if speedCfg.launchChargePower then
+                        print(string.format("ChgP  : %.3f", speedCfg.launchChargePower))
                     end
                     if speedCfg.cannonVelocityMultiplier and speedCfg.cannonVelocityMultiplier ~= 1.0 then
                         print(string.format("Gun x : %.3f", speedCfg.cannonVelocityMultiplier))
