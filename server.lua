@@ -869,6 +869,16 @@ local function checkPendingTimeouts()
     local maxRetries = cfg.pending_job_retries or 2
 
     for id, job in pairs(pending) do
+        local target = (job.startStock or 0) + (job.expectedOutput or 0)
+        local output = job.recipe and job.recipe.output
+        if job.awaitingReturn and output and target > 0 and stockOf(output) >= target then
+            pending[id] = nil
+            ui.status = ("Returned: %s x%d reached vault"):format(
+                job.recipe.name, job.qty)
+        end
+    end
+
+    for id, job in pairs(pending) do
         local started = job.startedAt or now
         local timeoutMs = pendingTimeoutFor(job) * 1000
         if now - started >= timeoutMs then
@@ -2063,7 +2073,6 @@ local function handleMsg(sid, msg)
     elseif msg.type == "DONE" then
         local job = pending[msg.id]
         if job then
-            pending[msg.id] = nil
             if stations[job.stationName] then
                 stations[job.stationName].busy = false
             end
@@ -2071,14 +2080,17 @@ local function handleMsg(sid, msg)
             local qStr = #queue > 0
                 and ("  [%d queued]"):format(#queue) or ""
             if arrived then
+                pending[msg.id] = nil
                 ui.status = ("Done: %s x%d via %s -- vault updated%s"):format(
                     job.recipe.name, job.qty, job.stationName, qStr)
+                tryDispatchNext()
+                checkMinStock()
             else
-                ui.status = ("Done: %s x%d via %s -- waiting for vault%s"):format(
+                job.awaitingReturn = true
+                job.startedAt = os.epoch("utc")
+                ui.status = ("Station done: %s x%d via %s -- waiting for vault%s"):format(
                     job.recipe.name, job.qty, job.stationName, qStr)
             end
-            tryDispatchNext()
-            checkMinStock()
         end
 
     elseif msg.type == "DENY" then
