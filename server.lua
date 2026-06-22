@@ -762,7 +762,7 @@ local function dispatchToAddress(address, recipe, qty)
     return ok, err
 end
 
-local function dispatchCraft(rec, qty, attempts)
+local function dispatchCraft(rec, qty, attempts, missingRecoveries)
     local stName, sid = findFreeStation(rec.station, "crafting")
     if not stName then
         ui.status = "ERROR: no crafting station online"
@@ -793,6 +793,7 @@ local function dispatchCraft(rec, qty, attempts)
         expectedOutput = expectedOutput,
         startedAt = os.epoch("utc"),
         attempts = attempts or 0,
+        missingRecoveries = missingRecoveries or 0,
     }
 
     rednet.send(sid, {
@@ -811,7 +812,7 @@ end
 
 -- Processing stations receive the ingredient package through Create logistics,
 -- then send output home only after the requested item count is complete.
-local function dispatchProcess(rec, qty, attempts)
+local function dispatchProcess(rec, qty, attempts, missingRecoveries)
     local stName, sid = findFreeStation(rec.station, "processing")
     if not stName then
         ui.status = "ERROR: processing station offline: " .. tostring(rec.station)
@@ -840,6 +841,7 @@ local function dispatchProcess(rec, qty, attempts)
         expectedOutput = expected,
         startedAt = os.epoch("utc"),
         attempts = attempts or 0,
+        missingRecoveries = missingRecoveries or 0,
     }
     rednet.send(sid, {
         type         = "PROCESS_REQUEST",
@@ -901,6 +903,7 @@ local function checkPendingTimeouts()
                     rec = job.recipe,
                     qty = job.qty,
                     attempts = (job.attempts or 0) + 1,
+                    missingRecoveries = job.missingRecoveries or 0,
                 })
                 ui.status = ("Retrying timed-out job: %s x%d (%d/%d)"):format(
                     job.recipe.name, job.qty, (job.attempts or 0) + 1, maxRetries)
@@ -988,7 +991,7 @@ local function tryDispatchNext()
                 end
                 i = i + 1
             else
-                local ok = dispatchProcess(job.rec, job.qty, job.attempts)
+                local ok = dispatchProcess(job.rec, job.qty, job.attempts, job.missingRecoveries)
                 if ok then
                     dispatched = dispatched + 1
                     table.remove(queue, i)
@@ -1014,7 +1017,7 @@ local function tryDispatchNext()
                 end
                 i = i + 1  -- no station free; skip for now
             else
-                local ok = dispatchCraft(job.rec, job.qty, job.attempts)
+                local ok = dispatchCraft(job.rec, job.qty, job.attempts, job.missingRecoveries)
                 if ok then
                     dispatched = dispatched + 1
                     table.remove(queue, i)
@@ -1297,6 +1300,82 @@ local function waitForVaultReturn(job)
 
     scanVault()
     return stockOf(job.recipe.output) >= target
+end
+
+local function parseShortageReason(reason)
+    if type(reason) ~= "string" then return nil end
+
+    local item, need, have = reason:match("[Nn]ot enough (.+): need (%d+), placed (%d+)")
+    if not item then
+        item, need, have = reason:match("[Nn]ot enough (.+): need (%d+), have (%d+)")
+    end
+    if not item then
+        item, have, need = reason:match("[Nn]ot enough (.+): have (%d+), need (%d+)")
+    end
+    if not item then return nil end
+
+    item = item:gsub("^%s+", ""):gsub("%s+$", "")
+    need = tonumber(need)
+    have = tonumber(have) or 0
+    if not need or need <= have then return nil end
+
+    local candidates = { resolveItem(item) }
+    if not item:find(":", 1, true) then
+        local normalized = item:lower():gsub("%s+", "_")
+        candidates[#candidates + 1] = normalized
+        candidates[#candidates + 1] = "create:" .. normalized
+        candidates[#candidates + 1] = "minecraft:" .. normalized
+    end
+
+    return {
+        item = candidates[1],
+        candidates = candidates,
+        short = need - have,
+        need = need,
+        have = have,
+    }
+end
+
+local function queueMissingDependency(job, reason)
+    local shortage = parseShortageReason(reason)
+    if not shortage or not job or not job.recipe then return false end
+
+    local maxRecoveries = cfg.missing_dependency_retries or 3
+    local recoveries = job.missingRecoveries or 0
+    if recoveries >= maxRecoveries then return false end
+
+    scanVault()
+    local plan, plannedItem = nil, nil
+    for _, candidate in ipairs(shortage.candidates or { shortage.item }) do
+        local candidatePlan = buildCraftPlan(candidate, shortage.short)
+        if #candidatePlan > 0 then
+            plan = candidatePlan
+            plannedItem = candidate
+            break
+        end
+    end
+    if not plan then return false end
+
+    table.insert(queue, 1, {
+        rec = job.recipe,
+        qty = job.qty,
+        attempts = (job.attempts or 0) + 1,
+        missingRecoveries = recoveries + 1,
+        status = "retry after missing dependency",
+    })
+
+    for i = #plan, 1, -1 do
+        table.insert(queue, 1, {
+            rec = plan[i].rec,
+            qty = plan[i].qty,
+            status = "missing dependency",
+        })
+    end
+
+    local label = plannedItem:match(":(.+)") or plannedItem
+    ui.status = ("Queued missing %s x%d, then retrying %s x%d"):format(
+        label, shortage.short, job.recipe.name, job.qty)
+    return true
 end
 
 -- Drawing helpers
@@ -2179,8 +2258,12 @@ local function handleMsg(sid, msg)
             end
             local qStr = #queue > 0
                 and ("  [%d queued]"):format(#queue) or ""
-            ui.status = "DENIED: " .. (msg.reason or "unknown reason") .. qStr
-            tryDispatchNext()
+            if queueMissingDependency(job, msg.reason) then
+                tryDispatchNext()
+            else
+                ui.status = "DENIED: " .. (msg.reason or "unknown reason") .. qStr
+                tryDispatchNext()
+            end
         end
     end
 end

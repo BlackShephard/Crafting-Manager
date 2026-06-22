@@ -259,7 +259,27 @@ local function waitForItems(recipe, qty, timeout)
         if ready then return true end
         os.sleep(0.5)
     end
-    return false
+
+    local have = {}
+    for _, stack in pairs(inputChest.list()) do
+        local item = resolveItem(stack.name)
+        have[item] = (have[item] or 0) + stack.count
+    end
+    for item, n in pairs(needed) do
+        local count = item == "<any_planks>" and 0 or (have[item] or 0)
+        if item == "<any_planks>" then
+            for name, stackCount in pairs(have) do
+                if type(name) == "string" and name:sub(-7) == "_planks" then
+                    count = count + stackCount
+                end
+            end
+        end
+        if count < n then
+            return false, ("Not enough %s: need %d, have %d"):format(
+                item == "<any_planks>" and "planks" or item, n, count)
+        end
+    end
+    return false, "Timed out waiting for items in staging barrel"
 end
 
 -- Push each ingredient from the staging barrel into its designated
@@ -335,8 +355,9 @@ local function executeCraft(recipe, qty)
 
     -- 1. Wait for all items to arrive in the staging barrel.
     print("  Waiting for items in staging barrel...")
-    if not waitForItems(recipe, qty, 30) then
-        return false, "Timed out waiting for items in staging barrel"
+    local ready, waitErr = waitForItems(recipe, qty, 30)
+    if not ready then
+        return false, waitErr or "Timed out waiting for items in staging barrel"
     end
 
     -- Helper: count how many of the recipe output are currently in the barrel.
