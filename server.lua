@@ -927,28 +927,80 @@ local function isProcessingRecipe(rec)
     )
 end
 
+local function missingSummary(rec, qty)
+    local needed = {}
+    for _, ing in ipairs(rec.ingredients or {}) do
+        local item = ingredientKey(ing.item)
+        needed[item] = (needed[item] or 0) + (ing.count or 1) * (qty or 1)
+    end
+    for item, need in pairs(needed) do
+        local have = stockOf(item)
+        if have < need then
+            local label = item:match(":(.+)") or item
+            return ("%s %d/%d"):format(label, have, need)
+        end
+    end
+    return nil
+end
+
+local function queueWaitReason(job)
+    if not job or not job.rec then return "invalid job" end
+    local missing = missingSummary(job.rec, job.qty)
+    if missing then return "missing " .. missing end
+
+    if isProcessingRecipe(job.rec) then
+        local stName = job.rec.station
+        local st = stName and stations[stName]
+        if not st then return "station offline: " .. tostring(stName) end
+        if st.busy then return "station busy: " .. tostring(stName) end
+        if not stationMatches(st, "processing") then
+            return "wrong station type: " .. tostring(stName)
+        end
+        return nil
+    end
+
+    local _, freeN = countStations("crafting")
+    if freeN <= 0 then return "crafting stations busy/offline" end
+    return nil
+end
+
 local function tryDispatchNext()
     scanVault()
 
     local i = 1
+    local dispatched = 0
+    local firstWait = nil
     while i <= #queue do
         local job = queue[i]
-        if not canCraft(job.rec, job.qty) then
-            -- Ingredients not ready yet; leave in queue
+        local waitReason = queueWaitReason(job)
+        if waitReason then
+            job.status = waitReason
+            if not firstWait then
+                firstWait = ("%s x%d: %s"):format(job.rec.name, job.qty, waitReason)
+            end
             i = i + 1
         elseif isProcessingRecipe(job.rec) then
             -- Processing job: needs its matching processing station controller.
             if not findFreeStation(job.rec.station, "processing") then
+                job.status = "station unavailable"
+                if not firstWait then
+                    firstWait = ("%s x%d: %s"):format(job.rec.name, job.qty, job.status)
+                end
                 i = i + 1
             else
                 local ok = dispatchProcess(job.rec, job.qty, job.attempts)
                 if ok then
+                    dispatched = dispatched + 1
                     table.remove(queue, i)
                     if ui.queueSel >= i then
                         ui.queueSel = math.max(0, ui.queueSel - 1)
                     end
                     -- i unchanged; re-check same position (now holds next job)
                 else
+                    job.status = ui.status or "dispatch failed"
+                    if not firstWait then
+                        firstWait = ("%s x%d: %s"):format(job.rec.name, job.qty, job.status)
+                    end
                     i = i + 1
                 end
             end
@@ -956,19 +1008,32 @@ local function tryDispatchNext()
             -- Mechanical crafter job: needs a free CC station
             local stName = findFreeStation(nil, "crafting")
             if not stName then
+                job.status = "crafting stations busy/offline"
+                if not firstWait then
+                    firstWait = ("%s x%d: %s"):format(job.rec.name, job.qty, job.status)
+                end
                 i = i + 1  -- no station free; skip for now
             else
                 local ok = dispatchCraft(job.rec, job.qty, job.attempts)
                 if ok then
+                    dispatched = dispatched + 1
                     table.remove(queue, i)
                     if ui.queueSel >= i then
                         ui.queueSel = math.max(0, ui.queueSel - 1)
                     end
                 else
+                    job.status = ui.status or "dispatch failed"
+                    if not firstWait then
+                        firstWait = ("%s x%d: %s"):format(job.rec.name, job.qty, job.status)
+                    end
                     i = i + 1
                 end
             end
         end
+    end
+
+    if dispatched == 0 and firstWait and #queue > 0 then
+        ui.status = "Queue waiting: " .. firstWait
     end
 end
 
@@ -1636,12 +1701,19 @@ local function drawQueueTab(W, H)
         y = y + 1
         for _, p in ipairs(pendList) do
             if y > 3 + listH then break end
+            local state = p.job.awaitingReturn and "WAIT RETURN" or "IN PROGRESS"
             mfill(1, y, leftW, " ", colors.yellow, C.bg)
             mw(2, y, trunc(
-               ("%s x%d"):format(p.job.recipe.name, p.job.qty),
+               ("[%s] %s x%d"):format(state, p.job.recipe.name, p.job.qty),
                leftW - 1), colors.yellow, C.bg)
             mw(divX, y, "|", C.sub, C.bg)
             y = y + 1
+            if y <= 3 + listH then
+                mfill(1, y, leftW, " ", C.dim, C.bg)
+                mw(4, y, trunc("via " .. tostring(p.job.stationName), leftW - 3), C.dim, C.bg)
+                mw(divX, y, "|", C.sub, C.bg)
+                y = y + 1
+            end
         end
     end
 
@@ -1661,8 +1733,9 @@ local function drawQueueTab(W, H)
             local fg  = sel and C.selTx or colors.white
             local bg  = sel and C.sel   or C.bg
             mfill(rightX, ry, rightW, " ", fg, bg)
+            local prefix = job.status and "* " or ""
             mw(rightX, ry, trunc(
-               ("%d. %s x%d"):format(row, job.rec.name, job.qty),
+               ("%d. %s%s x%d"):format(row, prefix, job.rec.name, job.qty),
                rightW), fg, bg)
         end
     end
@@ -1674,9 +1747,9 @@ local function drawQueueTab(W, H)
 
     if ui.queueSel >= 1 and ui.queueSel <= #queue then
         local job = queue[ui.queueSel]
-        mw(rightX, btnY, trunc(
-           (" CANCEL JOB: %s x%d "):format(job.rec.name, job.qty),
-           rightW), C.btnTx, C.bad)
+        local label = (" CANCEL JOB: %s x%d "):format(job.rec.name, job.qty)
+        if job.status then label = label .. " [" .. job.status .. "]" end
+        mw(rightX, btnY, trunc(label, rightW), C.btnTx, C.bad)
     elseif #queue == 0 then
         mw(rightX, btnY, trunc(" Queue is empty", rightW), C.dim, C.bg)
     else
@@ -2000,8 +2073,9 @@ local function handleQueueTouch(x, y, W, H)
             ui.queueSel = (ui.queueSel == idx) and 0 or idx
             if ui.queueSel > 0 then
                 local job = queue[ui.queueSel]
-                ui.status = ("Selected #%d: %s x%d"):format(
-                    ui.queueSel, job.rec.name, job.qty)
+                ui.status = ("Selected #%d: %s x%d%s"):format(
+                    ui.queueSel, job.rec.name, job.qty,
+                    job.status and (" -- " .. job.status) or "")
             end
         end
         return
