@@ -765,17 +765,33 @@ local function main()
     local pendingVelocityReconfig = false
     local pendingProjectileSwap = false
     local pendingCalibrate = false
+    local inputMode = false
 
     local lastTime = os.epoch("utc") / 1000
     local lastShipPos = nil
     local lastGoodSablePos = nil
     local velEst = v(0, 0, 0)
 
+    local function runPrompt(fn)
+        local unpackResult = table.unpack or unpack
+        inputMode = true
+        local result = { pcall(fn) }
+        inputMode = false
+        if not result[1] then error(result[2]) end
+        table.remove(result, 1)
+        lastTime = os.epoch("utc") / 1000
+        lastShipPos = nil
+        velEst = v(0, 0, 0)
+        return unpackResult(result)
+    end
+
     local function controlLoop()
         while running do
             if pendingRetarget then
                 pendingRetarget = false
-                target = promptTargetOnly(target)
+                target = runPrompt(function()
+                    return promptTargetOnly(target)
+                end)
             end
             if pendingArcToggle then
                 pendingArcToggle = false
@@ -783,11 +799,13 @@ local function main()
             end
             if pendingVelocityReconfig then
                 pendingVelocityReconfig = false
-                muzzleSpeed, speedCfg = chooseMuzzleVelocity()
+                muzzleSpeed, speedCfg = runPrompt(chooseMuzzleVelocity)
             end
             if pendingProjectileSwap then
                 pendingProjectileSwap = false
-                local vNew = quickChangeProjectile(speedCfg)
+                local vNew = runPrompt(function()
+                    return quickChangeProjectile(speedCfg)
+                end)
                 if vNew then muzzleSpeed = vNew end
             end
 
@@ -839,7 +857,9 @@ local function main()
             local calibratedNow = false
             if pendingCalibrate and pose then
                 pendingCalibrate = false
-                calibrateSableOffset(pose.pos)
+                runPrompt(function()
+                    calibrateSableOffset(pose.pos)
+                end)
                 lastShipPos = nil
                 calibratedNow = true
             elseif pendingCalibrate then
@@ -887,6 +907,9 @@ local function main()
             print(string.format("Source:%s  Arc:%s  v0:%.2f (%s)", source, arc, muzzleSpeed, speedCfg.mode))
             print(string.format("Drag  : %s", (CONFIG.drag_enabled and speedCfg.projectileMass) and "on" or "off"))
             print(string.format("Yaw mode: %s / %s", CONFIG.world_yaw_mode, CONFIG.yaw_command_mode))
+            print(string.format("Pitch cfg: inv=%s off=%+.2f clamp=%.0f..%.0f",
+                tostring(CONFIG.invert_pitch), CONFIG.pitch_offset_deg,
+                CONFIG.min_pitch, CONFIG.max_pitch))
             print(string.format("Sable off: (%.1f, %.1f, %.1f)", CONFIG.sable_offset_x, CONFIG.sable_offset_y, CONFIG.sable_offset_z))
             print(string.format("Target: (%.2f, %.2f, %.2f)", target.x, target.y, target.z))
             print(string.format("Shootr: (%.2f, %.2f, %.2f)", shooterPosNorm.x, shooterPosNorm.y, shooterPosNorm.z))
@@ -936,7 +959,9 @@ local function main()
     local function keyLoop()
         while running do
             local _, key = os.pullEvent("key")
-            if key == keys.f then
+            if inputMode then
+                -- Ignore hotkeys while read()/target prompts are active.
+            elseif key == keys.f then
                 pendingFire = true
             elseif key == keys.a then
                 pendingArcToggle = true
