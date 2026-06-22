@@ -705,6 +705,9 @@ local function findFreeStation(preferredName, stationType)
             and stationMatches(stations[preferredName], stationType) then
         return preferredName, stations[preferredName].id
     end
+    if preferredName then
+        return nil, nil
+    end
     for name, st in pairs(stations) do
         if not st.busy and stationMatches(st, stationType) then
             return name, st.id
