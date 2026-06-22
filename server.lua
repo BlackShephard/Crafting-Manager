@@ -870,6 +870,8 @@ local function isProcessingRecipe(rec)
 end
 
 local function tryDispatchNext()
+    scanVault()
+
     local i = 1
     while i <= #queue do
         local job = queue[i]
