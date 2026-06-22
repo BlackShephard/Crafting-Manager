@@ -22,15 +22,19 @@ local CONFIG = {
     world_yaw_mode = "mc",
 
     -- Command mode for cannon mount yaw:
-    -- "world"         -> setTargetAngles(yaw_world, pitch)
-    -- "ship_relative" -> setTargetAngles(yaw_world - heading + auto_yaw_offset, pitch)
-    yaw_command_mode = "ship_relative",
+    -- "world"         -> setTargetAngles(yaw_world + yaw_offset_deg, pitch)
+    -- "ship_relative" -> setTargetAngles(yaw_world - heading + auto_yaw_offset + yaw_offset_deg, pitch)
+    -- Use "world" for a stationary/world-mounted direct cannon mount.
+    yaw_command_mode = "world",
+
+    -- Only used by yaw_command_mode = "ship_relative".
     auto_yaw_offset = 270,
 
+    -- Applies in both yaw modes as the final yaw trim.
     yaw_offset_deg = 0,
-    pitch_offset_deg = 0,
+    pitch_offset_deg = 90,
     invert_yaw = false,
-    invert_pitch = false,
+    invert_pitch = true,
 
     -- Arrow-key nudge step while on the firing screen.
     nudge_step_deg = 0.1,
@@ -871,7 +875,10 @@ local function main()
 
             local sol, err = nil, nil
             local cmdYaw, cmdPitch = nil, nil
+            local targetBearing = nil
             if not calibratedNow then
+                local targetDelta = vsub(target, shooterPosNorm)
+                targetBearing = worldYawFromUnit(vnorm(v(targetDelta.x, 0, targetDelta.z)) or v(0, 0, -1))
                 if CONFIG.drag_enabled and speedCfg.projectileMass then
                     sol, err = solveBallisticWithDrag(
                         target,
@@ -907,6 +914,11 @@ local function main()
             print(string.format("Source:%s  Arc:%s  v0:%.2f (%s)", source, arc, muzzleSpeed, speedCfg.mode))
             print(string.format("Drag  : %s", (CONFIG.drag_enabled and speedCfg.projectileMass) and "on" or "off"))
             print(string.format("Yaw mode: %s / %s", CONFIG.world_yaw_mode, CONFIG.yaw_command_mode))
+            if CONFIG.yaw_command_mode == "ship_relative" then
+                print(string.format("Yaw cfg : auto=%+.2f trim=%+.2f", CONFIG.auto_yaw_offset, CONFIG.yaw_offset_deg))
+            else
+                print(string.format("Yaw cfg : trim=%+.2f", CONFIG.yaw_offset_deg))
+            end
             print(string.format("Pitch cfg: inv=%s off=%+.2f clamp=%.0f..%.0f",
                 tostring(CONFIG.invert_pitch), CONFIG.pitch_offset_deg,
                 CONFIG.min_pitch, CONFIG.max_pitch))
@@ -940,6 +952,9 @@ local function main()
                 print("Heading: N/A")
             end
             if sol then
+                if targetBearing then
+                    print(string.format("Tgt bearing: %.2f", targetBearing))
+                end
                 print(string.format("Sol yaw/pitch: %.2f / %.2f  TOF: %.2f", sol.worldYaw, sol.pitch, sol.tof))
                 print(string.format("Cmd yaw/pitch: %.2f / %.2f", cmdYaw, cmdPitch))
             else
