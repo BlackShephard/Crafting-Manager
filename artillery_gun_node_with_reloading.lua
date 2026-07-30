@@ -194,6 +194,10 @@ local authRejects = 0
 local completedOrders = {}
 local running = true
 local modemName = nil
+local modemNames = {}
+local receivedPacketCount = 0
+local lastReceivedType = nil
+local lastReceivedSender = nil
 local lastPose = nil
 local lastPoseAt = nil
 local velocity = {x = 0, y = 0, z = 0}
@@ -749,27 +753,51 @@ local function moveOneToDepot(specification, description)
 end
 
 local function openWirelessModem()
-    local ok, modem = pcall(peripheral.find, "modem", function(_, candidate)
-        return type(candidate.isWireless) == "function" and candidate.isWireless()
+    local ok, modems = pcall(function()
+        return {peripheral.find("modem", function(_, candidate)
+            return type(candidate.isWireless) == "function"
+                and candidate.isWireless()
+        end)}
     end)
-    if not ok or not modem then return nil, "No wireless modem" end
-    local nameOk, name = pcall(peripheral.getName, modem)
-    if not nameOk or not name then return nil, "Cannot identify modem" end
-    local openOk, openError = pcall(function()
-        if not rednet.isOpen(name) then rednet.open(name) end
-    end)
-    if not openOk then return nil, tostring(openError) end
-    return name
+    if not ok or type(modems) ~= "table" or #modems == 0 then
+        modemNames = {}
+        return nil, "No wireless or ender modem"
+    end
+
+    local opened, lastOpenError = {}, nil
+    for _, modem in ipairs(modems) do
+        local nameOk, name = pcall(peripheral.getName, modem)
+        if nameOk and name then
+            local openOk, openError = pcall(function()
+                if not rednet.isOpen(name) then rednet.open(name) end
+            end)
+            if openOk then
+                opened[#opened + 1] = name
+            else
+                lastOpenError = tostring(openError)
+            end
+        end
+    end
+    modemNames = opened
+    if #opened == 0 then
+        return nil, lastOpenError or "Could not open attached modems"
+    end
+    return opened[1]
 end
 
 local function ensureModem()
-    if modemName then
-        local ok, isOpen = pcall(rednet.isOpen, modemName)
-        if ok and isOpen then return true end
+    if modemName and #modemNames > 0 then
+        local allOpen = true
+        for _, name in ipairs(modemNames) do
+            local ok, isOpen = pcall(rednet.isOpen, name)
+            if not ok or not isOpen then allOpen = false break end
+        end
+        if allOpen then return true end
     end
     local errorMessage
     modemName, errorMessage = openWirelessModem()
     if not modemName then
+        modemNames = {}
         lastError = "COMMS OFFLINE: " .. tostring(errorMessage)
         return false
     end
@@ -782,6 +810,7 @@ local function safeSend(recipient, message)
     local ok, sent = pcall(rednet.send, recipient, message, CONFIG.protocol)
     if not ok then
         modemName = nil
+        modemNames = {}
         lastError = "COMMS ERROR: " .. tostring(sent)
         return false
     end
@@ -794,6 +823,7 @@ local function safeBroadcast(message)
     local ok, sent = pcall(rednet.broadcast, message, CONFIG.protocol)
     if not ok then
         modemName = nil
+        modemNames = {}
         lastError = "COMMS ERROR: " .. tostring(sent)
         return false
     end
@@ -1320,6 +1350,9 @@ end
 local function handleMessage(sender, message, mount, mountName)
     if type(message) ~= "table" or message.version ~= CONFIG.protocol_version then return end
     if not authenticateIncoming(sender, message) then return end
+    receivedPacketCount = receivedPacketCount + 1
+    lastReceivedType = tostring(message.type or "?")
+    lastReceivedSender = sender
     if message.type == "discover" then
         if centralId and sender ~= centralId
             and nowMs() - centralLastSeen < CONFIG.central_timeout_s * 1000 then
@@ -1459,7 +1492,13 @@ local function draw(mount, mountName)
     print("=== Phoenix Artillery Gun Node ===")
     print(string.format("Computer:%d  Label:%s", os.getComputerID(), os.getComputerLabel() or "none"))
     print("Mount: " .. tostring(mount and (mountName or "online") or "OFFLINE"))
-    print(string.format("Central:%s Modem:%s Auth:%s", tostring(centralId or "searching"), modemName and "online" or "OFF", CONFIG.security_enabled and "ON" or "OFF"))
+    local receiveSummary = lastReceivedType
+        and (tostring(lastReceivedSender) .. ":" .. lastReceivedType:sub(1, 10))
+        or "-"
+    print(string.format("Central:%s M:%s(%d) Auth:%s RX:%d/%s",
+        tostring(centralId or "searching"), modemName and "ON" or "OFF",
+        #modemNames, CONFIG.security_enabled and "ON" or "OFF",
+        receivedPacketCount, receiveSummary))
     local mountConfig, profileName = resolvedMountConfig()
     print(string.format("Broadside:%s Profile:%s Enabled:%s",
         tostring(assignedSide), tostring(profileName), CONFIG.gun_enabled and "YES" or "NO"))
@@ -1573,6 +1612,7 @@ local function main()
             if foundMount ~= mount then enableMount(foundMount) end
             mount, mountName = foundMount, foundName
             modemName = nil
+            modemNames = {}
             loaderOnline, loaderSourceName, loaderDepotName = false, nil, nil
             ensureModem()
             resolveLoaderInventories(true)
