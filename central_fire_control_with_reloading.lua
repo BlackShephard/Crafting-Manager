@@ -144,6 +144,9 @@ local lastSolveMs = 0
 local authModule = nil
 local seenAuthNonces = {}
 local authRejects = 0
+local sentPacketCount = 0
+local lastSentType = nil
+local lastSentRecipient = nil
 
 local function nowMs()
     return os.epoch("utc")
@@ -369,6 +372,11 @@ local function safeSend(recipient, message)
         statusLine = "COMMS ERROR: " .. tostring(sent)
         return false
     end
+    if sent ~= false then
+        sentPacketCount = sentPacketCount + 1
+        lastSentType = tostring(message.type or "?")
+        lastSentRecipient = tostring(recipient)
+    end
     return sent ~= false
 end
 
@@ -381,6 +389,11 @@ local function safeBroadcast(message)
         modemNames = {}
         statusLine = "COMMS ERROR: " .. tostring(sent)
         return false
+    end
+    if sent ~= false then
+        sentPacketCount = sentPacketCount + 1
+        lastSentType = tostring(message.type or "?")
+        lastSentRecipient = "*"
     end
     return sent ~= false
 end
@@ -1686,7 +1699,15 @@ local function drawMonitor(force)
             return controlsLocked and colors.lightGray or normalColor
         end
 
-        monitorWriteAt(2, 1, short("PHOENIX FIRE CONTROL  AUTH:" .. (CONFIG.security_enabled and "ON" or "OFF"), width - 2), colors.yellow, colors.black)
+        local transmitSummary = lastSentType
+            and string.format(" TX:%d/%s>%s", sentPacketCount,
+                lastSentType:sub(1, 9), tostring(lastSentRecipient))
+            or " TX:0/-"
+        monitorWriteAt(2, 1, short(
+            "PHOENIX FIRE CONTROL AUTH:"
+                .. (CONFIG.security_enabled and "ON" or "OFF")
+                .. transmitSummary,
+            width - 2), colors.yellow, colors.black)
         local half = math.floor(width / 2)
         if aimMode == "manual" then
             local sideThird = math.floor((width - 2) / 3)
@@ -1897,9 +1918,11 @@ local function draw()
     else
         print("Target: not set (press T)")
     end
-    print(string.format("Aim:%s Fire:%s Count:%s Projectile:%s Auth:%s",
+    print(short(string.format("Aim:%s Fire:%s Count:%s Projectile:%s Auth:%s TX:%d/%s>%s",
         aimMode, fireMode, gunCountMode == "full" and "FULL" or tostring(gunCountMode),
-        CONFIG.projectile_name, CONFIG.security_enabled and "ON" or "OFF"))
+        CONFIG.projectile_name, CONFIG.security_enabled and "ON" or "OFF",
+        sentPacketCount, tostring(lastSentType or "-"),
+        tostring(lastSentRecipient or "-")), width))
     print(short(string.format("Fixed 1ch/5u/full cart v0:%.2f Drag:%s Solve:%dms Ripple:%.1fs",
         CONFIG.muzzle_speed, CONFIG.drag_enabled and "on" or "off",
         lastSolveMs, CONFIG.ripple_duration_s), width))
@@ -1978,8 +2001,11 @@ local function main()
     ensureModem()
     sendDiscovery(true)
     ensureMonitor()
-    local timer = os.startTimer(0.10)
+    -- Arm the periodic tick only after the initial monitor redraw. Monitor
+    -- writes are yielding peripheral calls and may otherwise consume the timer
+    -- event before the main loop begins waiting for it.
     draw()
+    local timer = os.startTimer(0.10)
     while running do
         local event, a, b, c = os.pullEvent()
         if event == "rednet_message" and c == CONFIG.protocol then
@@ -1992,8 +2018,12 @@ local function main()
             sendDiscovery(true)
             ensureMonitor()
             drawMonitor(true)
+            timer = os.startTimer(0.10)
         elseif event == "monitor_touch" then
             handleMonitorTouch(a, b, c)
+            -- handleMonitorTouch performs a full monitor redraw. Start a fresh
+            -- tick afterward in case that redraw consumed the prior timer.
+            timer = os.startTimer(0.10)
         elseif event == "timer" and a == timer then
             tick()
             timer = os.startTimer(0.10)
@@ -2010,10 +2040,10 @@ local function main()
                 else
                     statusLine = "Order locked: only F FIRE, C EMERGENCY, or Q quit"
                 end
-            elseif a == keys.t then promptTarget(); timer = os.startTimer(0.10)
-            elseif a == keys.r then promptRipple(); timer = os.startTimer(0.10)
-            elseif a == keys.p then promptProjectile(); timer = os.startTimer(0.10)
-            elseif a == keys.x then promptManualAim(); timer = os.startTimer(0.10)
+            elseif a == keys.t then promptTarget()
+            elseif a == keys.r then promptRipple()
+            elseif a == keys.p then promptProjectile()
+            elseif a == keys.x then promptManualAim()
             elseif a == keys.d then toggleAimMode()
             elseif a == keys.left then adjustManualAim(-CONFIG.manual_yaw_step_deg, 0)
             elseif a == keys.right then adjustManualAim(CONFIG.manual_yaw_step_deg, 0)
@@ -2027,6 +2057,7 @@ local function main()
             elseif a == keys.l then beginLoadOrder()
             end
             draw()
+            if running then timer = os.startTimer(0.10) end
         end
     end
     term.clear(); term.setCursorPos(1, 1)
