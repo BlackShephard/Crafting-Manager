@@ -23,12 +23,14 @@ local CONFIG = {
     coarse_nudge_step_deg = 5.0,
 
     -- The source inventory holds shells and fully filled big cartridges. The
-    -- depot is the one-slot Create depot watched by the mechanical arm. Leave
-    -- these nil to auto-select the largest inventory as source and the
-    -- smallest inventory as depot, or set exact peripheral names shown by the
-    -- node diagnostics.
+    -- two depots are watched by separate input deployers. Leave these nil to
+    -- auto-select the largest inventory as source and the two smallest other
+    -- inventories as depots, or set exact names shown by node diagnostics.
     loader_enabled = true,
     loader_source_inventory = nil,
+    loader_depot_inventories = nil,
+    -- Legacy first-depot preference. When set without the list above, the
+    -- second depot is still auto-discovered.
     loader_depot_inventory = nil,
     loader_shell_delay_s = 2.0,
     loader_cartridge_delay_s = 2.0,
@@ -177,6 +179,7 @@ local pendingFire = nil
 local loaderJob = nil
 local loaderSourceName = nil
 local loaderDepotName = nil
+local loaderDepotNames = {}
 local loaderOnline = false
 local loaderState = "EMPTY"
 local loaderError = nil
@@ -662,15 +665,20 @@ local function resolveLoaderInventories(force)
         loaderError = "Loader disabled in CONFIG"
         return nil, loaderError
     end
-    if not force and loaderOnline and loaderSourceName and loaderDepotName then
+    if not force and loaderOnline and loaderSourceName
+        and #loaderDepotNames == 2 then
         local source = inventoryInfo(loaderSourceName)
-        local depot = inventoryInfo(loaderDepotName)
-        if source and source.canPush and depot then return source.peripheral, depot.peripheral end
+        local depotOne = inventoryInfo(loaderDepotNames[1])
+        local depotTwo = inventoryInfo(loaderDepotNames[2])
+        if source and source.canPush and depotOne and depotTwo then
+            return source.peripheral, {depotOne, depotTwo}
+        end
     end
 
     loaderOnline, loaderSourceName, loaderDepotName = false, nil, nil
+    loaderDepotNames = {}
     local inventories = discoverInventories()
-    local sourceInfo, depotInfo
+    local sourceInfo
     if CONFIG.loader_source_inventory then
         sourceInfo = inventoryInfo(CONFIG.loader_source_inventory)
         if not sourceInfo or not sourceInfo.canPush then
@@ -688,26 +696,59 @@ local function resolveLoaderInventories(force)
         return nil, loaderError
     end
 
-    if CONFIG.loader_depot_inventory then
-        depotInfo = inventoryInfo(CONFIG.loader_depot_inventory)
-        if not depotInfo then
-            loaderError = "Invalid loader_depot_inventory: "
-                .. tostring(CONFIG.loader_depot_inventory)
+    local depotInfos, usedNames = {}, {[sourceInfo.name] = true}
+    local function addDepotName(name, settingName)
+        if type(name) ~= "string" or name == "" then
+            return nil, "Invalid " .. settingName .. ": " .. tostring(name)
+        end
+        if usedNames[name] then
+            return nil, settingName .. " duplicates source or another depot: " .. name
+        end
+        local info = inventoryInfo(name)
+        if not info then return nil, "Invalid " .. settingName .. ": " .. name end
+        usedNames[name] = true
+        depotInfos[#depotInfos + 1] = info
+        return true
+    end
+
+    if CONFIG.loader_depot_inventories ~= nil then
+        if type(CONFIG.loader_depot_inventories) ~= "table"
+            or #CONFIG.loader_depot_inventories ~= 2 then
+            loaderError = "loader_depot_inventories must contain exactly two names"
             return nil, loaderError
         end
+        for index, name in ipairs(CONFIG.loader_depot_inventories) do
+            local added, addError = addDepotName(
+                name, "loader_depot_inventories[" .. index .. "]"
+            )
+            if not added then loaderError = addError return nil, loaderError end
+        end
     else
+        if CONFIG.loader_depot_inventory then
+            local added, addError = addDepotName(
+                CONFIG.loader_depot_inventory, "loader_depot_inventory"
+            )
+            if not added then loaderError = addError return nil, loaderError end
+        end
         for _, info in ipairs(inventories) do
-            if info.name ~= sourceInfo.name then depotInfo = info break end
+            if #depotInfos >= 2 then break end
+            if not usedNames[info.name] then
+                usedNames[info.name] = true
+                depotInfos[#depotInfos + 1] = info
+            end
         end
     end
-    if not depotInfo then
-        loaderError = "No separate depot inventory found"
+    if #depotInfos ~= 2 then
+        loaderError = string.format(
+            "Two separate loader depots required; found %d", #depotInfos)
         return nil, loaderError
     end
 
-    loaderSourceName, loaderDepotName = sourceInfo.name, depotInfo.name
+    loaderSourceName = sourceInfo.name
+    loaderDepotNames = {depotInfos[1].name, depotInfos[2].name}
+    loaderDepotName = table.concat(loaderDepotNames, " + ")
     loaderOnline, loaderError = true, nil
-    return sourceInfo.peripheral, depotInfo.peripheral
+    return sourceInfo.peripheral, depotInfos
 end
 
 local function valueInList(value, list)
@@ -731,10 +772,47 @@ local function itemMatches(source, slot, summary, specification)
     return false
 end
 
-local function moveOneToDepot(specification, description)
-    local source, depotOrError = resolveLoaderInventories(false)
-    if not source then return nil, depotOrError or loaderError end
-    local depot = depotOrError
+local function attemptInventoryTransfer(source, depotInfo, matchingSlot)
+    local pushOk, pushed = pcall(
+        source.pushItems, depotInfo.name, matchingSlot, 1
+    )
+    if pushOk and pushed == 1 then return true end
+
+    -- Some CC peripheral layouts expose a directly attached source as "left"
+    -- while a depot has a wired-network name. Try the equivalent transfer from
+    -- the destination side before declaring the inventories disconnected.
+    local depot = depotInfo.peripheral
+    local pullAvailable = type(depot.pullItems) == "function"
+    local pullOk, pulled = false, "pullItems unavailable"
+    if pullAvailable then
+        pullOk, pulled = pcall(
+            depot.pullItems, loaderSourceName, matchingSlot, 1
+        )
+        if pullOk and pulled == 1 then return true end
+    end
+
+    if pushOk and tonumber(pushed) == 0
+        and pullAvailable and pullOk and tonumber(pulled) == 0 then
+        return nil, "occupied or transfer refused", true
+    end
+
+    local pushResult = pushOk
+        and ("moved " .. tostring(pushed))
+        or tostring(pushed)
+    local pullResult = not pullAvailable and "method unavailable"
+        or pullOk and ("moved " .. tostring(pulled))
+        or tostring(pulled)
+    return nil, string.format(
+        "push %s -> %s: %s; pull %s <- %s: %s",
+        tostring(loaderSourceName), tostring(depotInfo.name), pushResult,
+        tostring(depotInfo.name), tostring(loaderSourceName), pullResult
+    ), false
+end
+
+local function moveOneToDepot(specification, description, excludedDepotName)
+    local source, depotsOrError = resolveLoaderInventories(false)
+    if not source then return nil, depotsOrError or loaderError end
+    local depots = depotsOrError
     local listOk, contents = pcall(source.list)
     if not listOk or type(contents) ~= "table" then
         loaderOnline = false
@@ -760,42 +838,29 @@ local function moveOneToDepot(specification, description)
         return nil, "No " .. description .. " in " .. loaderSourceName
             .. (#available > 0 and ("; found " .. table.concat(available, ", ")) or "; source empty")
     end
-    local pushOk, pushed = pcall(
-        source.pushItems, loaderDepotName, matchingSlot, 1
-    )
-    if pushOk and pushed == 1 then return true end
 
-    -- Some CC peripheral layouts expose a directly attached source as "left"
-    -- while the depot has a wired-network name such as "create:depot_0".
-    -- source.pushItems cannot always resolve across that boundary, but the
-    -- reverse operation may still be routable by the depot.
-    local pullAvailable = type(depot.pullItems) == "function"
-    local pullOk, pulled = false, "pullItems unavailable"
-    if pullAvailable then
-        pullOk, pulled = pcall(
-            depot.pullItems, loaderSourceName, matchingSlot, 1
-        )
-        if pullOk and pulled == 1 then return true end
+    local failures, candidateCount, allOccupied = {}, 0, true
+    for _, depotInfo in ipairs(depots) do
+        if depotInfo.name ~= excludedDepotName then
+            candidateCount = candidateCount + 1
+            local moved, transferError, occupied = attemptInventoryTransfer(
+                source, depotInfo, matchingSlot
+            )
+            if moved then return true, depotInfo.name end
+            failures[#failures + 1] = depotInfo.name .. ": " .. tostring(transferError)
+            if not occupied then allOccupied = false end
+        end
     end
-
-    if pushOk and tonumber(pushed) == 0
-        and pullAvailable and pullOk and tonumber(pulled) == 0 then
-        return nil, "Depot occupied or refused " .. description
+    if candidateCount == 0 then
+        return nil, "No second depot available for " .. description
     end
-
-    loaderOnline = false
-    local pushResult = pushOk
-        and ("moved " .. tostring(pushed))
-        or tostring(pushed)
-    local pullResult = not pullAvailable and "method unavailable"
-        or pullOk and ("moved " .. tostring(pulled))
-        or tostring(pulled)
-    return nil, string.format(
-        "Inventory transfer failed. push %s -> %s: %s; pull %s <- %s: %s. "
-            .. "Connect BOTH source and depot by wired modems to the same cable network.",
-        tostring(loaderSourceName), tostring(loaderDepotName), pushResult,
-        tostring(loaderDepotName), tostring(loaderSourceName), pullResult
-    )
+    if not allOccupied then loaderOnline = false end
+    local prefix = allOccupied and "Loader depot occupied/refused"
+        or "Inventory transfer failed"
+    local topologyHint = allOccupied and "" or
+        ". Connect source and BOTH depots by wired modems to the same cable network"
+    return nil, prefix .. " for " .. description .. ": "
+        .. table.concat(failures, " | ") .. topologyHint
 end
 
 local function openWirelessModem()
@@ -1261,26 +1326,29 @@ local function serviceLoader()
     if not job or nowMs() < job.nextAt then return end
     if job.stage == "MOVE_SHELL" then
         loaderState = "MOVING SHELL"
-        local moved, moveError = moveOneToDepot(
+        local moved, depotOrError = moveOneToDepot(
             PROJECTILE_ITEMS[job.projectile], job.projectile
         )
-        if not moved then failLoaderJob(moveError) return end
+        if not moved then failLoaderJob(depotOrError) return end
+        job.shellDepotName = depotOrError
         job.stage = "WAIT_AFTER_SHELL"
         job.nextAt = nowMs() + CONFIG.loader_shell_delay_s * 1000
         loaderState = "SHELL SENT"
-        lastCommand = string.format("Shell sent; cartridge in %.1fs",
-            CONFIG.loader_shell_delay_s)
+        lastCommand = string.format("Shell -> %s; cartridge in %.1fs",
+            job.shellDepotName, CONFIG.loader_shell_delay_s)
     elseif job.stage == "WAIT_AFTER_SHELL" then
         loaderState = "MOVING CARTRIDGE"
-        local moved, moveError = moveOneToDepot(
-            CARTRIDGE_ITEM, "fully loaded big cartridge"
+        local moved, depotOrError = moveOneToDepot(
+            CARTRIDGE_ITEM, "fully loaded big cartridge",
+            job.shellDepotName
         )
-        if not moved then failLoaderJob(moveError) return end
+        if not moved then failLoaderJob(depotOrError) return end
+        job.cartridgeDepotName = depotOrError
         job.stage = "WAIT_AFTER_CARTRIDGE"
         job.nextAt = nowMs() + CONFIG.loader_cartridge_delay_s * 1000
         loaderState = "CARTRIDGE SENT"
-        lastCommand = string.format("Cartridge sent; ready in %.1fs",
-            CONFIG.loader_cartridge_delay_s)
+        lastCommand = string.format("Cartridge -> %s; ready in %.1fs",
+            job.cartridgeDepotName, CONFIG.loader_cartridge_delay_s)
     elseif job.stage == "WAIT_AFTER_CARTRIDGE" then
         loadedProjectile = job.projectile
         loaderState, loaderError = "LOADED", nil
@@ -1348,6 +1416,7 @@ local function sendHello(mount, mountName)
             loadedProjectile = loadedProjectile,
             loaderSourceName = loaderSourceName,
             loaderDepotName = loaderDepotName,
+            loaderDepotNames = {loaderDepotNames[1], loaderDepotNames[2]},
             loaderError = loaderError,
         })
         return
@@ -1379,6 +1448,7 @@ local function sendHello(mount, mountName)
         loadedProjectile = loadedProjectile,
         loaderSourceName = loaderSourceName,
         loaderDepotName = loaderDepotName,
+        loaderDepotNames = {loaderDepotNames[1], loaderDepotNames[2]},
         loaderError = loaderError,
     })
 end
@@ -1706,15 +1776,17 @@ local function drawAttachedMonitor(mount, mountName)
                 + (pendingWelcomePacket and 1 or 0),
             networkQueueDrops), colors.lightGray, width)
         appendWrapped(lines, "", string.format(
-            "Loader %s | Loaded %s | Source %s | Depot %s",
+            "Loader %s | Loaded %s | Source %s | Depots %s",
             loaderOnline and loaderState or "OFFLINE",
             tostring(loadedProjectile or "EMPTY"),
             tostring(loaderSourceName or "?"), tostring(loaderDepotName or "?")),
             loaderError and colors.orange or colors.lime, width)
         if loaderJob then
             appendWrapped(lines, "", string.format(
-                "Load job %s | Stage %s | Order %s",
+                "Load job %s | Stage %s | Shell depot %s | Cartridge depot %s | Order %s",
                 tostring(loaderJob.projectile), tostring(loaderJob.stage),
+                tostring(loaderJob.shellDepotName or "-"),
+                tostring(loaderJob.cartridgeDepotName or "-"),
                 tostring(loaderJob.loadOrderId)), colors.yellow, width)
         end
 
@@ -1835,13 +1907,15 @@ local function draw(mount, mountName)
         mountConfig.min_elevation_deg, mountConfig.max_elevation_deg,
         tostring(mountConfig.invert_pitch), mountConfig.pitch_offset_deg))
     print(string.format("Runtime trim yaw/pitch: %+.1f / %+.1f", runtimeYawTrim, runtimePitchTrim))
-    print(string.format("Loader:%s  Source:%s  Depot:%s",
+    print(string.format("Loader:%s  Source:%s  Depots:%s",
         loaderOnline and loaderState or "OFFLINE",
         tostring(loaderSourceName or "?"), tostring(loaderDepotName or "?")))
     print("Loaded shell: " .. tostring(loadedProjectile or "EMPTY"))
     if loaderJob then
-        print(string.format("Load job:%s %s",
-            loaderJob.projectile, loaderJob.stage))
+        print(string.format("Load job:%s %s S:%s C:%s",
+            loaderJob.projectile, loaderJob.stage,
+            tostring(loaderJob.shellDepotName or "-"),
+            tostring(loaderJob.cartridgeDepotName or "-")))
     end
     if lastAimState and lastAimState.mode == "manual" then
         print(string.format("Manual yaw/elev %+.2f / %+.2f",
@@ -1998,6 +2072,7 @@ local function main()
                     modemNames = {}
                     monitor, monitorName = nil, nil
                     loaderOnline, loaderSourceName, loaderDepotName = false, nil, nil
+                    loaderDepotNames = {}
                     ensureModem()
                     ensureMonitor(true)
                     resolveLoaderInventories(true)
