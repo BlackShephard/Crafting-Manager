@@ -14,7 +14,9 @@ local CONFIG = {
     restart_after_crash_s = 3.0,
     heartbeat_s = 1.0,
     display_refresh_s = 0.20,
+    control_tick_s = 0.10,
     central_timeout_s = 8.0,
+    monitor_text_scale = 0.5,
     fire_hold_s = 0.20,
     velocity_alpha = 0.70,
     nudge_step_deg = 0.1,
@@ -183,6 +185,7 @@ local completedLoads = {}
 local emergencyStopRequested = false
 local firing = false
 local fireOffTimer = nil
+local fireOffAt = nil
 local lastCommand = "Waiting for central computer"
 local lastError = nil
 local lastAimState = nil
@@ -203,6 +206,16 @@ local observedRednetCount = 0
 local lastObservedSender = nil
 local lastObservedProtocolMatches = nil
 local lastObservedVersion = nil
+local networkInbox = {}
+local pendingAimPacket = nil
+local pendingDiscoverPacket = nil
+local pendingWelcomePacket = nil
+local networkQueueDrops = 0
+local networkHandlerError = nil
+local NETWORK_INBOX_EVENT = "phoenix_artillery_network_inbox"
+local NETWORK_QUEUE_LIMIT = 64
+local monitor = nil
+local monitorName = nil
 local lastPose = nil
 local lastPoseAt = nil
 local velocity = {x = 0, y = 0, z = 0}
@@ -1373,10 +1386,9 @@ local function handleMessage(sender, message, mount, mountName)
         centralId, centralLastSeen = sender, nowMs()
         assignedSide = message.side or assignedSide
         lastCommand = "Registered with central " .. sender
-        if lastRequestedAim then
-            local result, aimError = repeatLastAim(mount)
-            if not result then cancelPendingForInvalidAim(aimError) end
-        end
+        -- WELCOME is registration/keepalive metadata, not an aim command.
+        -- Re-aiming here made every heartbeat perform an extra yielding Sable
+        -- and mount call, which could bury real LOAD packets behind tracking.
         return
     end
     if centralId and sender ~= centralId and nowMs() - centralLastSeen < CONFIG.central_timeout_s * 1000 then return end
@@ -1446,6 +1458,7 @@ local function serviceFire(mount)
     loaderState = "EMPTY"
     saveLoadedProjectile()
     completedOrders[orderId] = nowMs()
+    fireOffAt = nowMs() + CONFIG.fire_hold_s * 1000
     fireOffTimer = os.startTimer(CONFIG.fire_hold_s)
     lastCommand = "FIRED order " .. orderId
     sendAck(orderId, "fired", true)
@@ -1457,18 +1470,105 @@ local function safeStopFiring(mount)
     if type(fireMethod) == "function" then pcall(fireMethod, false) end
 end
 
-local function processNetworkMessage(sender, message, protocol, mount, mountName)
+local function processNetworkMessage(sender, message, mount, mountName)
+    handleMessage(sender, message, mount, mountName)
+    if emergencyStopRequested then
+        safeStopFiring(mount)
+        firing, fireOffTimer, fireOffAt = false, nil, nil
+        emergencyStopRequested = false
+    end
+end
+
+local function packetPriority(message)
+    local messageType = type(message) == "table" and message.type or nil
+    if messageType == "emergency_abort" then return 1 end
+    if messageType == "cancel" then return 2 end
+    if messageType == "load" or messageType == "load_fire"
+        or messageType == "fire" then return 3 end
+    return 4
+end
+
+local function sameQueuedCommand(left, right)
+    if not left or not right then return false end
+    local leftMessage, rightMessage = left.message, right.message
+    if type(leftMessage) ~= "table" or type(rightMessage) ~= "table" then return false end
+    return left.sender == right.sender
+        and leftMessage.type == rightMessage.type
+        and leftMessage.orderId ~= nil
+        and leftMessage.orderId == rightMessage.orderId
+end
+
+local function insertNetworkCommand(packet)
+    -- Retries for the same command replace their queued copy. This prevents a
+    -- temporarily slow inventory/mount peripheral from building an old packet
+    -- backlog which would delay a later LOAD or emergency abort.
+    for index, queued in ipairs(networkInbox) do
+        if sameQueuedCommand(queued, packet) then
+            networkInbox[index] = packet
+            return
+        end
+    end
+    local priority = packetPriority(packet.message)
+    local insertAt = #networkInbox + 1
+    for index, queued in ipairs(networkInbox) do
+        if priority < packetPriority(queued.message) then
+            insertAt = index
+            break
+        end
+    end
+    if #networkInbox >= NETWORK_QUEUE_LIMIT then
+        if priority <= 2 then
+            table.remove(networkInbox, #networkInbox)
+        else
+            networkQueueDrops = networkQueueDrops + 1
+            return
+        end
+    end
+    table.insert(networkInbox, insertAt, packet)
+end
+
+local function receiveNetworkMessage(sender, message, protocol)
     observedRednetCount = observedRednetCount + 1
     lastObservedSender = sender
     lastObservedProtocolMatches = protocol == CONFIG.protocol
     lastObservedVersion = type(message) == "table" and message.version or nil
     if protocol ~= CONFIG.protocol then return end
-    handleMessage(sender, message, mount, mountName)
-    if emergencyStopRequested then
-        safeStopFiring(mount)
-        firing, fireOffTimer = false, nil
-        emergencyStopRequested = false
+
+    local packet = {sender = sender, message = message}
+    local messageType = type(message) == "table" and message.type or nil
+    if messageType == "aim" then
+        -- Only the newest tracking update matters. Central refreshes automatic
+        -- aim periodically, so executing every stale aim can otherwise starve
+        -- a load command when Sable or the cannon mount is slow.
+        pendingAimPacket = packet
+    elseif messageType == "discover" then
+        pendingDiscoverPacket = packet
+    elseif messageType == "welcome" then
+        pendingWelcomePacket = packet
+    else
+        insertNetworkCommand(packet)
     end
+    os.queueEvent(NETWORK_INBOX_EVENT)
+end
+
+local function nextNetworkPacket()
+    if #networkInbox > 0 then return table.remove(networkInbox, 1) end
+    if pendingWelcomePacket then
+        local packet = pendingWelcomePacket
+        pendingWelcomePacket = nil
+        return packet
+    end
+    if pendingDiscoverPacket then
+        local packet = pendingDiscoverPacket
+        pendingDiscoverPacket = nil
+        return packet
+    end
+    if pendingAimPacket then
+        local packet = pendingAimPacket
+        pendingAimPacket = nil
+        return packet
+    end
+    return nil
 end
 
 local function pruneCompletedOrders()
@@ -1502,6 +1602,163 @@ local function applyNudge(mount, key)
         end
     end
     return changed
+end
+
+local function ensureMonitor(force)
+    if monitor and not force then return monitor end
+    monitor, monitorName = nil, nil
+    local ok, found = pcall(peripheral.find, "monitor")
+    if not ok or not found then return nil end
+    local nameOk, foundName = pcall(peripheral.getName, found)
+    local setupOk = pcall(function()
+        found.setTextScale(CONFIG.monitor_text_scale)
+        found.setBackgroundColor(colors.black)
+        found.setTextColor(colors.white)
+    end)
+    if not setupOk then return nil end
+    monitor, monitorName = found, nameOk and foundName or "monitor"
+    return monitor
+end
+
+local function appendWrapped(lines, prefix, value, color, width)
+    local text = tostring(prefix or "") .. tostring(value or "")
+    width = math.max(8, width)
+    repeat
+        local part = text:sub(1, width)
+        if #text > width then
+            local splitAt = part:match("^.*()%s+")
+            if splitAt and splitAt > math.floor(width * 0.45) then
+                part = text:sub(1, splitAt - 1)
+                text = text:sub(splitAt + 1)
+            else
+                text = text:sub(width + 1)
+            end
+        else
+            text = ""
+        end
+        lines[#lines + 1] = {text = part, color = color or colors.white}
+    until text == ""
+end
+
+local function drawAttachedMonitor(mount, mountName)
+    local display = ensureMonitor(false)
+    if not display then return end
+    local ok, errorMessage = pcall(function()
+        local width, height = display.getSize()
+        local lines = {}
+        local mountConfig, profileName = resolvedMountConfig()
+        local pose = lastPose
+        local observedFrom = lastObservedSender and tostring(lastObservedSender) or "-"
+        local protocolState = lastObservedProtocolMatches == nil and "-"
+            or lastObservedProtocolMatches and "Y" or "N"
+        local battery = CONFIG.battery_role == "bow_chaser"
+            and string.format("BC-%s-%s",
+                CONFIG.side_override == "port" and "P"
+                    or CONFIG.side_override == "starboard" and "S" or "?",
+                tostring(CONFIG.chaser_number or "?"))
+            or string.format("%s-D%s-G%s",
+                CONFIG.side_override == "port" and "P"
+                    or CONFIG.side_override == "starboard" and "S" or "?",
+                tostring(CONFIG.deck_number or "?"),
+                tostring(CONFIG.gun_number or "?"))
+
+        appendWrapped(lines, "", "PHOENIX ARTILLERY GUN NODE", colors.cyan, width)
+        appendWrapped(lines, "", string.format(
+            "Computer %d  Battery %s  Side %s  Mount %s",
+            os.getComputerID(), battery, tostring(assignedSide),
+            tostring(mount and (mountName or "online") or "OFFLINE")),
+            colors.white, width)
+        appendWrapped(lines, "", string.format(
+            "Central %s | Modems %d | NET %d/%s P:%s V:%s | RX %d | Queue %d Drop %d",
+            tostring(centralId or "searching"), #modemNames,
+            observedRednetCount, observedFrom, protocolState,
+            tostring(lastObservedVersion or "-"), receivedPacketCount,
+            #networkInbox + (pendingAimPacket and 1 or 0)
+                + (pendingDiscoverPacket and 1 or 0)
+                + (pendingWelcomePacket and 1 or 0),
+            networkQueueDrops), colors.lightGray, width)
+        appendWrapped(lines, "", string.format(
+            "Loader %s | Loaded %s | Source %s | Depot %s",
+            loaderOnline and loaderState or "OFFLINE",
+            tostring(loadedProjectile or "EMPTY"),
+            tostring(loaderSourceName or "?"), tostring(loaderDepotName or "?")),
+            loaderError and colors.orange or colors.lime, width)
+        if loaderJob then
+            appendWrapped(lines, "", string.format(
+                "Load job %s | Stage %s | Order %s",
+                tostring(loaderJob.projectile), tostring(loaderJob.stage),
+                tostring(loaderJob.loadOrderId)), colors.yellow, width)
+        end
+
+        -- Errors are deliberately near the top and are never shortened. This
+        -- is the commissioning/debug display the small computer terminal lacks.
+        if loaderError then
+            appendWrapped(lines, "LOADER ERROR: ", loaderError, colors.orange, width)
+        end
+        if networkHandlerError then
+            appendWrapped(lines, "NETWORK ERROR: ", networkHandlerError, colors.red, width)
+        end
+        if lastError then
+            appendWrapped(lines, "ERROR: ", lastError, colors.red, width)
+        end
+        appendWrapped(lines, "LAST: ", lastCommand, colors.yellow, width)
+
+        if pose then
+            appendWrapped(lines, "", string.format(
+                "Position %.2f %.2f %.2f | Heading %s | Sable/source %s",
+                pose.position.x, pose.position.y, pose.position.z,
+                pose.heading and string.format("%.2f", pose.heading) or "N/A",
+                tostring(pose.source)), colors.white, width)
+        else
+            appendWrapped(lines, "", "Position unavailable", colors.orange, width)
+        end
+        appendWrapped(lines, "", string.format(
+            "Profile %s | Yaw %s center %.1f limits %+.1f..%+.1f",
+            tostring(profileName), tostring(mountConfig.yaw_command_mode),
+            mountConfig.yaw_center_deg, mountConfig.min_yaw_from_center_deg,
+            mountConfig.max_yaw_from_center_deg), colors.white, width)
+        appendWrapped(lines, "", string.format(
+            "Yaw map auto %+.1f invert %s offset %+.1f | trim %+.1f",
+            mountConfig.auto_yaw_offset, tostring(mountConfig.invert_yaw),
+            mountConfig.yaw_offset_deg, runtimeYawTrim), colors.white, width)
+        appendWrapped(lines, "", string.format(
+            "Elevation %+.1f..%+.1f | pitch invert %s offset %+.1f | trim %+.1f",
+            mountConfig.min_elevation_deg, mountConfig.max_elevation_deg,
+            tostring(mountConfig.invert_pitch), mountConfig.pitch_offset_deg,
+            runtimePitchTrim), colors.white, width)
+        if lastAimState and lastAimState.mode == "manual" then
+            appendWrapped(lines, "", string.format(
+                "Manual yaw/elev %+.2f/%+.2f | command %.2f/%.2f",
+                lastRequestedAim.manualYaw, lastRequestedAim.elevation,
+                lastAimState.commandYaw, lastAimState.commandPitch),
+                colors.lightBlue, width)
+        elseif lastAimState then
+            appendWrapped(lines, "", string.format(
+                "Aim world %.2f | frame %.2f | local yaw %+.2f | mount %.2f/%.2f | 3D %s",
+                lastAimState.worldYaw, lastAimState.frameYaw,
+                lastAimState.yawFromCenter, lastAimState.commandYaw,
+                lastAimState.commandPitch,
+                lastAimState.attitudeCompensated and "ON" or "OFF"),
+                colors.lightBlue, width)
+        end
+        if pendingFire then
+            appendWrapped(lines, "", string.format("Pending fire in %.2fs",
+                math.max(0, (pendingFire.fireAt - nowMs()) / 1000)),
+                colors.red, width)
+        end
+
+        display.setBackgroundColor(colors.black)
+        display.clear()
+        for row = 1, math.min(height, #lines) do
+            display.setCursorPos(1, row)
+            display.setTextColor(lines[row].color)
+            display.write(lines[row].text)
+        end
+    end)
+    if not ok then
+        monitor, monitorName = nil, nil
+        networkHandlerError = "Monitor draw failed: " .. tostring(errorMessage)
+    end
 end
 
 local function draw(mount, mountName)
@@ -1583,6 +1840,7 @@ local function draw(mount, mountName)
     end
     term.setCursorPos(1, height)
     write("Arrows=.1 | IJKL=5 | U=mark empty | Q=quit")
+    drawAttachedMonitor(mount, mountName)
 end
 
 local function main()
@@ -1598,14 +1856,86 @@ local function main()
     ensureModem()
     enableMount(mount)
     sendHello(mount, mountName)
-    local heartbeatTimer = os.startTimer(CONFIG.heartbeat_s)
-    local displayTimer = os.startTimer(CONFIG.display_refresh_s)
+    ensureMonitor(true)
     draw(mount, mountName)
+    -- Arm the service timer after monitor drawing. Monitor peripheral writes
+    -- yield, and a timer armed before a large draw can be consumed before the
+    -- control loop resumes, permanently stopping loader/heartbeat service.
+    local serviceTimer = os.startTimer(CONFIG.control_tick_s)
+    local nextHeartbeatAt = nowMs() + CONFIG.heartbeat_s * 1000
+    local nextDisplayAt = nowMs() + CONFIG.display_refresh_s * 1000
 
     local function networkLoop()
         while running do
             local _, sender, message, protocol = os.pullEvent("rednet_message")
-            processNetworkMessage(sender, message, protocol, mount, mountName)
+            -- Reception does no peripheral work. It only records/coalesces the
+            -- packet, so Sable, monitor, loader, or mount delays cannot stop
+            -- rednet from accepting later orders.
+            receiveNetworkMessage(sender, message, protocol)
+        end
+    end
+
+    local function commandLoop()
+        while running do
+            os.pullEvent(NETWORK_INBOX_EVENT)
+            local packet = nextNetworkPacket()
+            while running and packet do
+                local ok, commandError = pcall(
+                    processNetworkMessage,
+                    packet.sender, packet.message, mount, mountName
+                )
+                if not ok then
+                    networkHandlerError = tostring(commandError)
+                    lastError = "NETWORK HANDLER: " .. networkHandlerError
+                    -- Keep this coroutine alive. A malformed/stale command or
+                    -- one failed peripheral call must not silence the gun.
+                else
+                    networkHandlerError = nil
+                end
+                packet = nextNetworkPacket()
+            end
+        end
+    end
+
+    local function guardedHeartbeat()
+        local ok, heartbeatError = pcall(function()
+            local foundMount, foundName = findMount()
+            if foundMount ~= mount then enableMount(foundMount) end
+            mount, mountName = foundMount, foundName
+            ensureModem()
+            sendHello(mount, mountName)
+            pruneCompletedOrders()
+        end)
+        if not ok then
+            lastError = "HEARTBEAT: " .. tostring(heartbeatError)
+        end
+    end
+
+    local function guardedLoaderAndFire()
+        local loaderOk, serviceError = pcall(serviceLoader)
+        if not loaderOk then
+            local failure = "Internal loader error: " .. tostring(serviceError)
+            local reportOk = pcall(failLoaderJob, failure)
+            if not reportOk then
+                loaderJob = nil
+                loaderState = "ERROR"
+                loaderError = failure
+                lastError = "LOADER: " .. failure
+            end
+        end
+        local fireOk, fireError = pcall(serviceFire, mount)
+        if not fireOk then lastError = "FIRE SERVICE: " .. tostring(fireError) end
+        if firing and fireOffAt and nowMs() >= fireOffAt then
+            safeStopFiring(mount)
+            firing, fireOffTimer, fireOffAt = false, nil, nil
+        end
+    end
+
+    local function guardedDraw()
+        local ok, drawError = pcall(draw, mount, mountName)
+        if not ok then
+            monitor, monitorName = nil, nil
+            lastError = "DISPLAY: " .. tostring(drawError)
         end
     end
 
@@ -1613,33 +1943,40 @@ local function main()
         while running do
             local event, a = os.pullEvent()
             if event == "timer" then
-                if a == heartbeatTimer then
+                if a == serviceTimer then
+                    local now = nowMs()
+                    guardedLoaderAndFire()
+                    if now >= nextHeartbeatAt then
+                        guardedHeartbeat()
+                        nextHeartbeatAt = nowMs() + CONFIG.heartbeat_s * 1000
+                    end
+                    if now >= nextDisplayAt then
+                        guardedDraw()
+                        nextDisplayAt = nowMs() + CONFIG.display_refresh_s * 1000
+                    end
+                    -- Always arm this after all yielding peripheral/display
+                    -- work, so the scheduler cannot lose its only service tick.
+                    serviceTimer = os.startTimer(CONFIG.control_tick_s)
+                elseif a == fireOffTimer then
+                    safeStopFiring(mount)
+                    firing, fireOffTimer, fireOffAt = false, nil, nil
+                end
+            elseif event == "peripheral" or event == "peripheral_detach" then
+                local ok, peripheralError = pcall(function()
                     local foundMount, foundName = findMount()
                     if foundMount ~= mount then enableMount(foundMount) end
                     mount, mountName = foundMount, foundName
+                    modemName = nil
+                    modemNames = {}
+                    monitor, monitorName = nil, nil
+                    loaderOnline, loaderSourceName, loaderDepotName = false, nil, nil
                     ensureModem()
+                    ensureMonitor(true)
+                    resolveLoaderInventories(true)
                     sendHello(mount, mountName)
-                    pruneCompletedOrders()
-                    heartbeatTimer = os.startTimer(CONFIG.heartbeat_s)
-                elseif a == displayTimer then
-                    serviceLoader()
-                    serviceFire(mount)
-                    draw(mount, mountName)
-                    displayTimer = os.startTimer(CONFIG.display_refresh_s)
-                elseif a == fireOffTimer then
-                    safeStopFiring(mount)
-                    firing, fireOffTimer = false, nil
-                end
-            elseif event == "peripheral" or event == "peripheral_detach" then
-                local foundMount, foundName = findMount()
-                if foundMount ~= mount then enableMount(foundMount) end
-                mount, mountName = foundMount, foundName
-                modemName = nil
-                modemNames = {}
-                loaderOnline, loaderSourceName, loaderDepotName = false, nil, nil
-                ensureModem()
-                resolveLoaderInventories(true)
-                sendHello(mount, mountName)
+                end)
+                if not ok then lastError = "PERIPHERAL: " .. tostring(peripheralError) end
+                serviceTimer = os.startTimer(CONFIG.control_tick_s)
             elseif event == "key" then
                 if a == keys.q then
                     running = false
@@ -1656,11 +1993,13 @@ local function main()
                 else
                     applyNudge(mount, a)
                 end
+                guardedDraw()
+                serviceTimer = os.startTimer(CONFIG.control_tick_s)
             end
         end
     end
 
-    parallel.waitForAny(networkLoop, controlLoop)
+    parallel.waitForAny(networkLoop, commandLoop, controlLoop)
     running = false
     safeStopFiring(mount)
     term.clear(); term.setCursorPos(1, 1)
