@@ -187,8 +187,8 @@ local loadedProjectile = nil
 local completedLoads = {}
 local emergencyStopRequested = false
 local firing = false
-local fireOffTimer = nil
 local fireOffAt = nil
+local fireSignalMount = nil
 local lastCommand = "Waiting for central computer"
 local lastError = nil
 local lastAimState = nil
@@ -1528,6 +1528,37 @@ local function handleMessage(sender, message, mount, mountName)
     end
 end
 
+local function safeStopFiring(targetMount)
+    if not targetMount then return nil, "No cannon mount available for fire-off" end
+    local fireMethod = targetMount.fire
+    if type(fireMethod) ~= "function" then
+        return nil, "Cannon mount has no fire method"
+    end
+    local ok, errorMessage = pcall(fireMethod, false)
+    if not ok then return nil, tostring(errorMessage) end
+    return true
+end
+
+local function forceFireOff(currentMount, context)
+    local signalMount = fireSignalMount or currentMount
+    local stopped, stopError = safeStopFiring(signalMount)
+    local currentStopped, currentError = true, nil
+    if currentMount and currentMount ~= signalMount then
+        currentStopped, currentError = safeStopFiring(currentMount)
+    end
+    if stopped and currentStopped then
+        firing, fireOffAt, fireSignalMount = false, nil, nil
+        return true
+    end
+    firing = true
+    fireOffAt = nowMs() + CONFIG.control_tick_s * 1000
+    lastError = string.format("FIRE-OFF %s FAILED: %s%s",
+        tostring(context or ""),
+        tostring(stopError or "primary mount unknown"),
+        currentError and ("; current mount: " .. tostring(currentError)) or "")
+    return nil, lastError
+end
+
 local function serviceFire(mount)
     if not pendingFire or firing or nowMs() < pendingFire.fireAt then return end
     local orderId = pendingFire.orderId
@@ -1545,34 +1576,41 @@ local function serviceFire(mount)
         sendAck(orderId, "fired", false, lastError)
         return
     end
-    local ok, errorMessage = pcall(mount.fire, true)
-    if not ok then
-        lastError = tostring(errorMessage)
+    local fireOnOk, fireOnError = pcall(mount.fire, true)
+    if not fireOnOk then
+        lastError = tostring(fireOnError)
         sendAck(orderId, "fired", false, lastError)
         return
     end
     firing = true
+    fireSignalMount = mount
+    fireOffAt = nowMs() + CONFIG.fire_hold_s * 1000
     loadedProjectile = nil
     loaderState = "EMPTY"
     saveLoadedProjectile()
     completedOrders[orderId] = nowMs()
-    fireOffAt = nowMs() + CONFIG.fire_hold_s * 1000
-    fireOffTimer = os.startTimer(CONFIG.fire_hold_s)
-    lastCommand = "FIRED order " .. orderId
-    sendAck(orderId, "fired", true)
-end
 
-local function safeStopFiring(mount)
-    if not mount then return end
-    local fireMethod = mount.fire
-    if type(fireMethod) == "function" then pcall(fireMethod, false) end
+    -- Use the proven artillery.lua pulse semantics directly. This control
+    -- coroutine may pause for 0.2 seconds, while the dedicated network and
+    -- command coroutines remain responsive. fire(false) is attempted even if
+    -- the hold timer itself errors or is interrupted.
+    local holdOk, holdError = pcall(sleep, CONFIG.fire_hold_s)
+    local stopped = forceFireOff(mount, "after pulse")
+    lastCommand = stopped
+        and ("FIRED pulse complete " .. orderId)
+        or ("FIRED but fire-off retrying " .. orderId)
+    if not holdOk then
+        lastError = "FIRE HOLD INTERRUPTED: " .. tostring(holdError)
+    end
+    -- The round has already fired, so acknowledge success even if deassertion
+    -- needs watchdog retries. Retrying the order could discharge another round.
+    sendAck(orderId, "fired", true)
 end
 
 local function processNetworkMessage(sender, message, mount, mountName)
     handleMessage(sender, message, mount, mountName)
     if emergencyStopRequested then
-        safeStopFiring(mount)
-        firing, fireOffTimer, fireOffAt = false, nil, nil
+        forceFireOff(mount, "emergency abort")
         emergencyStopRequested = false
     end
 end
@@ -1957,6 +1995,8 @@ local function main()
     resolveLoaderInventories(true)
     ensureModem()
     enableMount(mount)
+    -- A reboot must never inherit an asserted computer-control fire signal.
+    safeStopFiring(mount)
     sendHello(mount, mountName)
     ensureMonitor(true)
     draw(mount, mountName)
@@ -2002,7 +2042,10 @@ local function main()
     local function guardedHeartbeat()
         local ok, heartbeatError = pcall(function()
             local foundMount, foundName = findMount()
-            if foundMount ~= mount then enableMount(foundMount) end
+            if foundMount ~= mount then
+                enableMount(foundMount)
+                if not firing then safeStopFiring(foundMount) end
+            end
             mount, mountName = foundMount, foundName
             ensureModem()
             sendHello(mount, mountName)
@@ -2028,8 +2071,7 @@ local function main()
         local fireOk, fireError = pcall(serviceFire, mount)
         if not fireOk then lastError = "FIRE SERVICE: " .. tostring(fireError) end
         if firing and fireOffAt and nowMs() >= fireOffAt then
-            safeStopFiring(mount)
-            firing, fireOffTimer, fireOffAt = false, nil, nil
+            forceFireOff(mount, "watchdog")
         end
     end
 
@@ -2059,14 +2101,14 @@ local function main()
                     -- Always arm this after all yielding peripheral/display
                     -- work, so the scheduler cannot lose its only service tick.
                     serviceTimer = os.startTimer(CONFIG.control_tick_s)
-                elseif a == fireOffTimer then
-                    safeStopFiring(mount)
-                    firing, fireOffTimer, fireOffAt = false, nil, nil
                 end
             elseif event == "peripheral" or event == "peripheral_detach" then
                 local ok, peripheralError = pcall(function()
                     local foundMount, foundName = findMount()
-                    if foundMount ~= mount then enableMount(foundMount) end
+                    if foundMount ~= mount then
+                        enableMount(foundMount)
+                        if not firing then safeStopFiring(foundMount) end
+                    end
                     mount, mountName = foundMount, foundName
                     modemName = nil
                     modemNames = {}
