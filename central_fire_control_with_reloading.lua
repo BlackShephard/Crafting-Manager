@@ -1,33 +1,23 @@
--- Phoenix networked artillery with automatic loading: central fire control.
+-- Phoenix networked artillery: central fire-control computer.
 -- Run this on an advanced computer with a wireless/ender modem.
--- Each cannon must run artillery_gun_node_with_reloading.lua.
+-- Each cannon must run artillery_gun_node.lua on its own computer.
 
 local CONFIG = {
-    protocol = "phoenix.artillery.reloading.v1",
-    protocol_version = 2,
+    protocol = "phoenix.artillery.v1",
+    protocol_version = 1,
     -- To secure the fleet, copy artillery_auth.lua to this computer and every
     -- gun node, set enabled=true everywhere, and use the same long secret.
     security_enabled = false,
     shared_secret = "",
     auth_max_age_ms = 30000,
-    -- Keep false while the original fire-control startup launcher exists.
-    install_startup = false,
+    install_startup = true,
     restart_after_crash_s = 3.0,
     node_timeout_s = 6.0,
     discovery_interval_s = 2.0,
     aim_update_s = 0.75,
+    fire_lead_s = 1.5,
     fire_resend_s = 0.25,
     fire_refresh_s = 2.0,
-    load_resend_s = 1.0,
-    load_order_timeout_s = 45.0,
-    -- FIRE waits this long for every selected loader. Any gun that has not
-    -- reported LOADED by the deadline is skipped before the broadside begins.
-    fire_load_phase_timeout_s = 15.0,
-    -- Added after the last scheduled shot when waiting for fired/rejected ACKs.
-    fire_ack_grace_s = 15.0,
-    fire_order_timeout_s = 120.0,
-    emergency_resend_s = 0.20,
-    emergency_broadcast_s = 3.0,
     ripple_duration_s = 20.0,
     ripple_adjust_s = 5.0,
     ripple_duration_variance_fraction = 0.30,
@@ -114,7 +104,6 @@ local target = nil
 local arc = CONFIG.default_arc
 local sideMode = "port"
 local fireMode = "ripple"
-local gunCountMode = "full"
 local singleFireCursor = {port = nil, starboard = nil, bow = nil}
 local aimMode = "automatic"
 local manualAim = {
@@ -128,9 +117,6 @@ local lastSolution = nil
 local lastSolutionError = "No target"
 local lastLayout = nil
 local firePlan = nil
-local loadPlan = nil
-local emergencyUntil = 0
-local lastEmergencySentAt = 0
 local statusLine = "Waiting for gun nodes"
 local running = true
 local modemName = nil
@@ -144,9 +130,6 @@ local lastSolveMs = 0
 local authModule = nil
 local seenAuthNonces = {}
 local authRejects = 0
-local sentPacketCount = 0
-local lastSentType = nil
-local lastSentRecipient = nil
 
 local function nowMs()
     return os.epoch("utc")
@@ -161,11 +144,11 @@ end
 local function ensureStartupLauncher()
     if not CONFIG.install_startup then return true end
     local startupDirectory = "/startup"
-    local startupPath = startupDirectory .. "/phoenix_fire_control_with_reloading.lua"
-    local programPath = "/central_fire_control_with_reloading.lua"
+    local startupPath = startupDirectory .. "/phoenix_fire_control.lua"
+    local programPath = "/central_fire_control.lua"
     local restartDelay = tonumber(CONFIG.restart_after_crash_s) or 3
     local content = table.concat({
-        "-- Installed automatically by Phoenix fire control with reloading.",
+        "-- Installed automatically by Phoenix central fire control.",
         "local program = " .. string.format("%q", programPath),
         "local restartDelay = " .. tostring(restartDelay),
         "if not fs.exists(program) then",
@@ -372,11 +355,6 @@ local function safeSend(recipient, message)
         statusLine = "COMMS ERROR: " .. tostring(sent)
         return false
     end
-    if sent ~= false then
-        sentPacketCount = sentPacketCount + 1
-        lastSentType = tostring(message.type or "?")
-        lastSentRecipient = tostring(recipient)
-    end
     return sent ~= false
 end
 
@@ -389,11 +367,6 @@ local function safeBroadcast(message)
         modemNames = {}
         statusLine = "COMMS ERROR: " .. tostring(sent)
         return false
-    end
-    if sent ~= false then
-        sentPacketCount = sentPacketCount + 1
-        lastSentType = tostring(message.type or "?")
-        lastSentRecipient = "*"
     end
     return sent ~= false
 end
@@ -486,7 +459,7 @@ local function activeNodes()
     local result = {}
     local cutoff = nowMs() - CONFIG.node_timeout_s * 1000
     for _, node in pairs(nodes) do
-        if node.lastSeen >= cutoff and node.enabled ~= false and validVec(node.position)
+        if node.lastSeen >= cutoff and validVec(node.position)
             and node.mountOnline ~= false and not batteryIdentityError(node) then
             node.station = batteryStation(node)
             node.batteryLabel = batteryLabel(node)
@@ -867,25 +840,6 @@ local function selectedGuns(layout, requireAimReady)
     return result, side
 end
 
-local function requestedGunCount()
-    if gunCountMode == "full" then return math.huge end
-    return tonumber(gunCountMode) or math.huge
-end
-
-local function gunsForOrder(layout, requireAimReady, advanceSingle)
-    local guns, side = selectedGuns(layout, requireAimReady)
-    if fireMode == "single" then
-        local selected = nextSingleGun(guns, side)
-        if not selected then return {}, side end
-        if advanceSingle then singleFireCursor[side] = cursorForNode(selected) end
-        return {selected}, side
-    end
-    local limit = math.min(#guns, requestedGunCount())
-    local limited = {}
-    for index = 1, limit do limited[index] = guns[index] end
-    return limited, side
-end
-
 local function sendWelcome(node)
     safeSend(node.id, {
         type = "welcome",
@@ -917,12 +871,6 @@ local function handleNetwork(sender, message)
         node.mountName = message.mountName
         node.mountOnline = message.mountOnline ~= false and message.ready ~= false
         node.hardwareError = message.error
-        node.loaderOnline = message.loaderOnline == true
-        node.loaderState = message.loaderState or "UNKNOWN"
-        node.loadedProjectile = message.loadedProjectile
-        node.loaderSourceName = message.loaderSourceName
-        node.loaderDepotName = message.loaderDepotName
-        node.loaderError = message.loaderError
         node.lastSeen = nowMs()
         node.ready = message.ready ~= false
         nodes[sender] = node
@@ -943,44 +891,12 @@ local function handleNetwork(sender, message)
             if message.ackType == "aim" and node.pendingAimOrder == message.orderId then
                 node.aimReady = message.accepted ~= false
             end
-            if loadPlan and loadPlan.orderId == message.orderId
-                and loadPlan.entries[sender] then
-                local entry = loadPlan.entries[sender]
-                if message.ackType == "load" and message.accepted ~= false then
-                    entry.accepted = true
-                elseif message.ackType == "loaded" and message.accepted ~= false then
-                    entry.accepted, entry.loaded = true, true
-                    node.loaderState = "LOADED"
-                    node.loadedProjectile = message.projectile or loadPlan.projectile
-                end
-            end
-            if firePlan and firePlan.orderId == message.orderId
-                and firePlan.entries[sender] then
-                local entry = firePlan.entries[sender]
-                if message.ackType == "load" and message.accepted ~= false then
-                    entry.accepted = true
-                elseif message.ackType == "loaded" and message.accepted ~= false then
-                    entry.accepted, entry.loaded = true, true
-                    node.loaderState = "LOADED"
-                    node.loadedProjectile = message.projectile or firePlan.projectile
-                elseif message.ackType == "fired" and message.accepted ~= false then
-                    entry.accepted, entry.loaded, entry.fired = true, true, true
-                    node.loaderState = "EMPTY"
-                    node.loadedProjectile = nil
-                end
-            end
             if message.accepted ~= false then
                 node.error = nil
             end
-            if message.accepted == false then
-                if loadPlan and loadPlan.orderId == message.orderId
-                    and loadPlan.entries[sender] then
-                    loadPlan.entries[sender].failed = true
-                end
-                if firePlan and firePlan.orderId == message.orderId
-                    and firePlan.entries[sender] then
-                    firePlan.entries[sender].failed = true
-                end
+            if message.accepted ~= false and firePlan and firePlan.orderId == message.orderId and firePlan.entries[sender] then
+                firePlan.entries[sender].acked = true
+            elseif message.accepted == false then
                 node.error = message.error or "Order rejected"
                 statusLine = string.format("Gun %d rejected order: %s", sender, node.error)
             end
@@ -992,12 +908,6 @@ local function handleNetwork(sender, message)
             node.ready = message.ready ~= false
             node.mountOnline = message.mountOnline ~= false and message.ready ~= false
             node.hardwareError = message.error
-            node.loaderOnline = message.loaderOnline == true
-            node.loaderState = message.loaderState or node.loaderState
-            node.loadedProjectile = message.loadedProjectile
-            node.loaderSourceName = message.loaderSourceName or node.loaderSourceName
-            node.loaderDepotName = message.loaderDepotName or node.loaderDepotName
-            node.loaderError = message.loaderError
             if node.mountOnline == false then
                 statusLine = string.format("Gun %d inactive: %s", sender, node.hardwareError or "cannon mount offline")
             end
@@ -1012,8 +922,7 @@ local function sendAim(layout, solution)
         -- Once a ripple is issued, never redirect the opposite broadside merely
         -- because casualties changed the automatic layout classification.
         for _, node in ipairs(layout.nodes) do
-            local entry = firePlan.entries[node.id]
-            if entry and not entry.failed then guns[#guns + 1] = node end
+            if firePlan.entries[node.id] then guns[#guns + 1] = node end
         end
     else
         guns = selectedGuns(layout)
@@ -1084,354 +993,101 @@ end
 
 local function beginFireOrder()
     if firePlan then statusLine = "A fire order is already active" return end
-    if nowMs() < emergencyUntil then statusLine = "Emergency abort broadcast is still active" return end
+    if fireMode == "single" and aimMode ~= "manual" then
+        statusLine = "SINGLE fire is available in manual aim mode only"
+        return
+    end
     local layout, layoutError = analyzeLayout()
     if not layout then statusLine = layoutError return end
     local solution, solutionError = solutionForMode(layout)
     if not solution then statusLine = solutionError return end
-    local now = nowMs()
-    lastSolution, lastSolutionError = solution, nil
-
-    if loadPlan then
-        -- Preserve the exact side/mode/count/projectile/gun set selected when
-        -- LOAD was pressed. Reusing its order ID lets nodes already loading
-        -- continue in place instead of feeding a duplicate round.
-        local promoted = loadPlan
-        loadPlan = nil
-        firePlan = {
-            orderId = promoted.orderId,
-            side = promoted.side,
-            mode = promoted.mode,
-            projectile = promoted.projectile,
-            solution = solution,
-            entries = promoted.entries,
-            -- A completed LOAD may wait at action stations indefinitely. FIRE
-            -- gets a fresh execution timeout even though it reuses the load ID.
-            startedAt = now,
-            phase = "loading",
-            phaseStartedAt = now,
-            loadDeadline = now + CONFIG.fire_load_phase_timeout_s * 1000,
-            orderedDuration = promoted.orderedDuration or CONFIG.ripple_duration_s,
-            actualDuration = 0,
-        }
-        local selectedCount, selectedNode = 0, nil
-        for _, entry in pairs(firePlan.entries) do
-            selectedCount = selectedCount + 1
-            selectedNode = selectedNode or entry.node
-            entry.fireDelayMs = 0
-            entry.fired = false
-            entry.lastSent = 0
-        end
-        if firePlan.mode == "single" and selectedNode then
-            singleFireCursor[firePlan.side] = cursorForNode(selectedNode)
-        end
-        statusLine = string.format(
-            "%s %s armed: waiting for %d selected loader%s",
-            firePlan.side, firePlan.mode, selectedCount,
-            selectedCount == 1 and "" or "s")
-    else
-        local guns, side = gunsForOrder(layout, true, true)
-        if #guns == 0 then statusLine = "No active guns in " .. side .. " battery" return end
-        local orderId = string.format("fire-%d-%d", os.getComputerID(), now)
-        firePlan = {
-            orderId = orderId,
-            side = side,
-            mode = fireMode,
-            projectile = CONFIG.projectile_name,
-            solution = solution,
-            entries = {},
-            startedAt = now,
-            phase = "loading",
-            phaseStartedAt = now,
-            loadDeadline = now + CONFIG.fire_load_phase_timeout_s * 1000,
-            orderedDuration = CONFIG.ripple_duration_s,
-            actualDuration = 0,
-        }
-        for index, node in ipairs(guns) do
-            firePlan.entries[node.id] = {
-                node = node,
-                fireDelayMs = 0,
-                sequenceIndex = index,
-                accepted = false,
-                loaded = false,
-                fired = false,
-                failed = false,
-                lastSent = 0,
-            }
-        end
-        statusLine = string.format(
-            "Loading %d %s gun%s before %s",
-            #guns, side, #guns == 1 and "" or "s", fireMode)
-    end
-end
-
-local function releaseLoadedFirePlan(now)
-    local survivorNodes, failedCount = {}, 0
-    for _, entry in pairs(firePlan.entries) do
-        if entry.loaded and not entry.failed then
-            survivorNodes[#survivorNodes + 1] = entry.node
-        else
-            failedCount = failedCount + 1
-        end
-    end
-    table.sort(survivorNodes, fireSlotLess)
-    if firePlan.mode == "ripple" then
-        survivorNodes = shuffleSameStationGroups(survivorNodes)
-    end
-    if #survivorNodes == 0 then
-        local side, mode = firePlan.side, firePlan.mode
-        firePlan = nil
-        statusLine = string.format(
-            "%s %s cancelled: no selected gun loaded (%d skipped)",
-            side, mode, failedCount)
-        return
+    local guns, side = selectedGuns(layout, true)
+    if #guns == 0 then statusLine = "No active guns in " .. side .. " battery" return end
+    if fireMode == "single" then
+        local selected = nextSingleGun(guns, side)
+        singleFireCursor[side] = cursorForNode(selected)
+        guns = {selected}
+    elseif fireMode == "ripple" then
+        guns = shuffleSameStationGroups(guns)
     end
 
+    local orderId = string.format("fire-%d-%d", os.getComputerID(), nowMs())
+    local firstShot = nowMs() + CONFIG.fire_lead_s * 1000
     local rippleOffsets, actualDuration = {}, 0
-    if firePlan.mode == "ripple" then
-        -- Recompute timing only across survivors, so a failed loader leaves no
-        -- dead slot and the live guns still span the ordered broadside.
-        rippleOffsets, actualDuration = buildRippleOffsets(#survivorNodes)
+    if fireMode == "ripple" then rippleOffsets, actualDuration = buildRippleOffsets(#guns) end
+    lastSolution, lastSolutionError = solution, nil
+    firePlan = {
+        orderId = orderId,
+        side = side,
+        mode = fireMode,
+        solution = solution,
+        entries = {},
+        startedAt = nowMs(),
+        orderedDuration = CONFIG.ripple_duration_s,
+        actualDuration = actualDuration,
+    }
+    for index, node in ipairs(guns) do
+        local entry = {
+            node = node,
+            fireAt = firstShot + (rippleOffsets[index] or 0) * 1000,
+            sequenceIndex = index,
+            acked = false,
+            lastSent = 0,
+        }
+        firePlan.entries[node.id] = entry
     end
-    for index, node in ipairs(survivorNodes) do
-        local entry = firePlan.entries[node.id]
-        entry.sequenceIndex = index
-        entry.fireDelayMs = (rippleOffsets[index] or 0) * 1000
-        entry.accepted = false
-        entry.lastSent = 0
+    if fireMode == "single" then
+        local node = guns[1]
+        statusLine = string.format("%s single: %s at station %.2f",
+            side, node.batteryLabel, node.station)
+    elseif fireMode == "salvo" then
+        statusLine = string.format("%s salvo: %d guns", side, #guns)
+    else
+        statusLine = string.format("%s ripple: %d guns over %.1fs (ordered %.1fs)",
+            side, #guns, actualDuration, CONFIG.ripple_duration_s)
     end
-    firePlan.phase = "firing"
-    firePlan.phaseStartedAt = now
-    firePlan.actualDuration = actualDuration
-    firePlan.fireDeadline = now
-        + actualDuration * 1000
-        + CONFIG.fire_ack_grace_s * 1000
-    statusLine = string.format(
-        "Load barrier complete: %d ready, %d skipped; releasing %s",
-        #survivorNodes, failedCount, firePlan.mode)
 end
 
 local function serviceFirePlan()
     if not firePlan then return end
     local now = nowMs()
-    if now - firePlan.startedAt > CONFIG.fire_order_timeout_s * 1000 then
-        local expired = firePlan
-        firePlan = nil
-        for nodeId in pairs(expired.entries) do
-            safeSend(nodeId, {
-                type = "cancel",
-                version = CONFIG.protocol_version,
-                orderId = expired.orderId,
-            })
-        end
-        statusLine = "Fire order timed out and was cancelled"
-        return
-    end
-
-    if firePlan.phase == "loading" then
-        local allResolved = true
-        for nodeId, entry in pairs(firePlan.entries) do
-            if not entry.loaded and not entry.failed then
-                if now >= firePlan.loadDeadline then
-                    entry.failed = true
-                    safeSend(nodeId, {
-                        type = "cancel",
-                        version = CONFIG.protocol_version,
-                        orderId = firePlan.orderId,
-                    })
-                else
-                    allResolved = false
-                    if now - entry.lastSent >= CONFIG.load_resend_s * 1000 then
-                        safeSend(nodeId, {
-                            type = "load",
-                            version = CONFIG.protocol_version,
-                            orderId = firePlan.orderId,
-                            projectile = firePlan.projectile,
-                            validUntil = firePlan.loadDeadline,
-                        })
-                        entry.lastSent = now
-                    end
-                end
-            end
-        end
-        if now >= firePlan.loadDeadline then allResolved = true end
-        if allResolved then releaseLoadedFirePlan(now) end
-        return
-    end
-
-    local allFinished, firedCount, failedCount = true, 0, 0
+    local finalFireAt = 0
+    local allPast = true
     for nodeId, entry in pairs(firePlan.entries) do
-        if entry.fired then firedCount = firedCount + 1 end
-        if entry.failed then failedCount = failedCount + 1 end
-        if not entry.fired and not entry.failed then
-            if firePlan.fireDeadline and now >= firePlan.fireDeadline then
-                entry.failed = true
-                failedCount = failedCount + 1
-                safeSend(nodeId, {
-                    type = "cancel",
-                    version = CONFIG.protocol_version,
-                    orderId = firePlan.orderId,
-                })
-            else
-                allFinished = false
-                local resendAfter = entry.accepted
-                    and CONFIG.fire_refresh_s or CONFIG.fire_resend_s
-                if now - entry.lastSent >= resendAfter * 1000 then
-                    local currentSolution = firePlan.solution
-                    if not firePlan.solution.manual
-                        and lastSolution and not lastSolution.manual then
-                        currentSolution = lastSolution
-                    end
-                    safeSend(nodeId, addAimFields({
-                        type = "load_fire",
-                        version = CONFIG.protocol_version,
-                        orderId = firePlan.orderId,
-                        projectile = firePlan.projectile,
-                        fireDelayMs = entry.fireDelayMs,
-                        validUntil = firePlan.fireDeadline,
-                    }, currentSolution))
-                    entry.lastSent = now
-                end
+        finalFireAt = math.max(finalFireAt, entry.fireAt)
+        if now <= entry.fireAt + 1000 then allPast = false end
+        local resendAfter = entry.acked and CONFIG.fire_refresh_s or CONFIG.fire_resend_s
+        if now < entry.fireAt - 100 and now - entry.lastSent >= resendAfter * 1000 then
+            local currentSolution = firePlan.solution
+            if not firePlan.solution.manual and lastSolution and not lastSolution.manual then
+                currentSolution = lastSolution
             end
+            safeSend(nodeId, addAimFields({
+                type = "fire",
+                version = CONFIG.protocol_version,
+                orderId = firePlan.orderId,
+                fireAt = entry.fireAt,
+            }, currentSolution))
+            entry.lastSent = now
         end
     end
-    if allFinished then
-        statusLine = string.format("%s %s complete: %d fired, %d failed",
-            firePlan.side, firePlan.mode, firedCount, failedCount)
-        firePlan = nil
-    end
+    if allPast and now > finalFireAt + 1000 then firePlan = nil end
 end
 
-local function beginLoadOrder()
-    if firePlan then statusLine = "Cannot issue LOAD during an active fire order" return end
-    if loadPlan then statusLine = "A load order is already active" return end
-    if nowMs() < emergencyUntil then statusLine = "Emergency abort broadcast is still active" return end
-    local layout, layoutError = analyzeLayout()
-    if not layout then statusLine = layoutError return end
-    local guns, side = gunsForOrder(layout, false, false)
-    if #guns == 0 then statusLine = "No active guns in " .. side .. " battery" return end
-    local orderId = string.format("load-%d-%d", os.getComputerID(), nowMs())
-    loadPlan = {
-        orderId = orderId,
-        side = side,
-        mode = fireMode,
-        projectile = CONFIG.projectile_name,
-        entries = {},
-        startedAt = nowMs(),
-        phase = "loading",
-        orderedDuration = CONFIG.ripple_duration_s,
-    }
-    for index, node in ipairs(guns) do
-        loadPlan.entries[node.id] = {
-            node = node,
-            sequenceIndex = index,
-            accepted = false,
-            loaded = false,
-            failed = false,
-            lastSent = 0,
-        }
-    end
-    statusLine = string.format("Loading %d %s gun%s with %s",
-        #guns, side, #guns == 1 and "" or "s", CONFIG.projectile_name)
-end
-
-local function serviceLoadPlan()
-    if not loadPlan then return end
-    if loadPlan.phase == "ready" then return end
-    local now = nowMs()
-    if now - loadPlan.startedAt > CONFIG.load_order_timeout_s * 1000 then
-        local loadedCount, failedCount = 0, 0
-        for nodeId, entry in pairs(loadPlan.entries) do
-            if entry.loaded then
-                loadedCount = loadedCount + 1
-            else
-                if not entry.failed then
-                    entry.failed = true
-                    safeSend(nodeId, {
-                        type = "cancel",
-                        version = CONFIG.protocol_version,
-                        orderId = loadPlan.orderId,
-                    })
-                end
-                failedCount = failedCount + 1
-            end
-        end
-        loadPlan.phase = "ready"
-        statusLine = string.format(
-            "%s load closed: %d loaded, %d skipped; FIRE or ABORT",
-            loadPlan.side, loadedCount, failedCount)
+local function cancelFirePlan(reason)
+    if not firePlan then
+        statusLine = "No active fire order to cancel"
         return
     end
-    local allFinished, loadedCount, failedCount = true, 0, 0
-    for nodeId, entry in pairs(loadPlan.entries) do
-        if entry.loaded then loadedCount = loadedCount + 1 end
-        if entry.failed then failedCount = failedCount + 1 end
-        if not entry.loaded and not entry.failed then
-            allFinished = false
-            if now - entry.lastSent >= CONFIG.load_resend_s * 1000 then
-                safeSend(nodeId, {
-                    type = "load",
-                    version = CONFIG.protocol_version,
-                    orderId = loadPlan.orderId,
-                    projectile = loadPlan.projectile,
-                    validUntil = loadPlan.startedAt + CONFIG.load_order_timeout_s * 1000,
-                })
-                entry.lastSent = now
-            end
-        end
+    for nodeId in pairs(firePlan.entries) do
+        safeSend(nodeId, {
+            type = "cancel",
+            version = CONFIG.protocol_version,
+            orderId = firePlan.orderId,
+        })
     end
-    if allFinished then
-        loadPlan.phase = "ready"
-        statusLine = string.format(
-            "%s load complete: %d loaded, %d failed; FIRE or ABORT",
-            loadPlan.side, loadedCount, failedCount)
-    end
-end
-
-local function cancelAllOrders(reason)
-    local plans = {firePlan, loadPlan}
-    for _, plan in ipairs(plans) do
-        if plan then
-            for nodeId in pairs(plan.entries) do
-                safeSend(nodeId, {
-                    type = "cancel",
-                    version = CONFIG.protocol_version,
-                    orderId = plan.orderId,
-                })
-            end
-        end
-    end
-    firePlan, loadPlan = nil, nil
-    statusLine = reason or "All active orders cancelled"
-end
-
-local function emergencyPacket()
-    return {
-        type = "emergency_abort",
-        version = CONFIG.protocol_version,
-        orderId = "abort-" .. tostring(nowMs()),
-    }
-end
-
-local function transmitEmergencyAbort()
-    safeBroadcast(emergencyPacket())
-    for nodeId in pairs(nodes) do safeSend(nodeId, emergencyPacket()) end
-    lastEmergencySentAt = nowMs()
-end
-
-local function emergencyAbort()
-    firePlan, loadPlan = nil, nil
-    emergencyUntil = nowMs() + CONFIG.emergency_broadcast_s * 1000
-    lastEmergencySentAt = 0
-    transmitEmergencyAbort()
-    statusLine = "EMERGENCY ABORT: all load/fire orders stopped"
-end
-
-local function serviceEmergencyAbort()
-    if nowMs() >= emergencyUntil then return end
-    if nowMs() - lastEmergencySentAt >= CONFIG.emergency_resend_s * 1000 then
-        transmitEmergencyAbort()
-    end
+    firePlan = nil
+    statusLine = reason or "Fire order cancelled"
 end
 
 local function readWhileNetworking()
@@ -1476,7 +1132,7 @@ local function parseCoordinateString(value)
 end
 
 local function promptTarget()
-    if firePlan or loadPlan then statusLine = "Target locked while an order is active" return end
+    if firePlan then statusLine = "Target locked while a fire order is active" return end
     term.clear(); term.setCursorPos(1, 1)
     print("=== Set Target ===")
     print("Paste X Y Z (spaces, commas, and labels accepted),")
@@ -1505,7 +1161,7 @@ local function promptRipple()
 end
 
 local function promptProjectile()
-    if firePlan or loadPlan then statusLine = "Projectile locked while an order is active" return end
+    if firePlan then statusLine = "Projectile locked while a fire order is active" return end
     term.clear(); term.setCursorPos(1, 1)
     print("=== Select Projectile ===")
     print("Fixed load: 1 chamber, 5 unrifled barrels, 1 full big cartridge")
@@ -1523,7 +1179,7 @@ local function promptProjectile()
 end
 
 local function cycleProjectile()
-    if firePlan or loadPlan then statusLine = "Projectile locked while an order is active" return end
+    if firePlan then statusLine = "Projectile locked while a fire order is active" return end
     local nextIndex = projectileIndex % #PROJECTILES + 1
     local ok, errorMessage = applyProjectile(nextIndex)
     if ok then
@@ -1535,7 +1191,7 @@ end
 
 local function setSide(side)
     if side ~= "port" and side ~= "starboard" and side ~= "bow" then return end
-    if firePlan or loadPlan then statusLine = "Broadside locked while an order is active" return end
+    if firePlan then statusLine = "Broadside locked while a fire order is active" return end
     if side == "bow" and aimMode ~= "manual" then
         statusLine = "Bow chasers are available in manual aim mode only"
         return
@@ -1556,34 +1212,30 @@ end
 
 local function setFireMode(mode)
     if mode ~= "ripple" and mode ~= "salvo" and mode ~= "single" then return end
-    if firePlan or loadPlan then statusLine = "Fire mode locked while an order is active" return end
+    if firePlan then statusLine = "Fire mode locked while an order is active" return end
+    if mode == "single" and aimMode ~= "manual" then
+        statusLine = "SINGLE fire is available in manual aim mode only"
+        return
+    end
     fireMode = mode
     statusLine = "Fire mode: " .. fireMode
 end
 
 local function cycleFireMode()
-    setFireMode(fireMode == "ripple" and "salvo"
-        or fireMode == "salvo" and "single" or "ripple")
-end
-
-local function setGunCountMode(value)
-    if value ~= 1 and value ~= 5 and value ~= 10 and value ~= "full" then return end
-    if firePlan or loadPlan then statusLine = "Gun count locked while an order is active" return end
-    gunCountMode = value
-    statusLine = "Gun count: " .. (value == "full" and "FULL" or tostring(value))
-end
-
-local function cycleGunCountMode()
-    setGunCountMode(gunCountMode == 1 and 5
-        or gunCountMode == 5 and 10
-        or gunCountMode == 10 and "full" or 1)
+    if aimMode == "manual" then
+        setFireMode(fireMode == "ripple" and "salvo"
+            or fireMode == "salvo" and "single" or "ripple")
+    else
+        setFireMode(fireMode == "ripple" and "salvo" or "ripple")
+    end
 end
 
 local function setAimMode(mode)
     if mode ~= "automatic" and mode ~= "manual" then return end
-    if firePlan or loadPlan then statusLine = "Aim mode locked while an order is active" return end
+    if firePlan then statusLine = "Aim mode locked while a fire order is active" return end
     aimMode = mode
     if mode == "automatic" and sideMode == "bow" then sideMode = "port" end
+    if mode == "automatic" and fireMode == "single" then fireMode = "ripple" end
     lastAimAt = 0
     lastSolution = nil
     lastSolutionError = mode == "manual" and nil or (target and "Calculating" or "No target")
@@ -1599,7 +1251,7 @@ end
 
 local function adjustManualAim(yawDelta, elevationDelta)
     if aimMode ~= "manual" then statusLine = "Enable MANUAL aim first" return end
-    if firePlan or loadPlan then statusLine = "Manual aim locked while an order is active" return end
+    if firePlan then statusLine = "Manual aim locked while a fire order is active" return end
     local setting = manualAim[sideMode]
     setting.yaw = clamp(setting.yaw + (yawDelta or 0),
         CONFIG.manual_min_yaw_deg, CONFIG.manual_max_yaw_deg)
@@ -1612,7 +1264,7 @@ end
 
 local function promptManualAim()
     if aimMode ~= "manual" then statusLine = "Enable MANUAL aim first" return end
-    if firePlan or loadPlan then statusLine = "Manual aim locked while an order is active" return end
+    if firePlan then statusLine = "Manual aim locked while a fire order is active" return end
     term.clear(); term.setCursorPos(1, 1)
     print("=== Manual " .. string.upper(sideMode) .. " Broadside Aim ===")
     local setting = manualAim[sideMode]
@@ -1626,31 +1278,15 @@ local function promptManualAim()
 end
 
 local function toggleArc()
-    if firePlan or loadPlan then statusLine = "Arc locked while an order is active" return end
+    if firePlan then statusLine = "Arc locked while a fire order is active" return end
     arc = arc == "low" and "high" or "low"
     lastAimAt = 0
     statusLine = "Trajectory arc: " .. arc
 end
 
 local function adjustRipple(delta)
-    if firePlan or loadPlan then
-        statusLine = "Ripple timing locked while an order is active"
-        return
-    end
     CONFIG.ripple_duration_s = math.max(0, CONFIG.ripple_duration_s + delta)
     statusLine = string.format("Ripple duration: %.1fs", CONFIG.ripple_duration_s)
-end
-
-local function planProgress(plan)
-    local total, loaded, fired, failed = 0, 0, 0, 0
-    if not plan then return total, loaded, fired, failed end
-    for _, entry in pairs(plan.entries) do
-        total = total + 1
-        if entry.loaded then loaded = loaded + 1 end
-        if entry.fired then fired = fired + 1 end
-        if entry.failed then failed = failed + 1 end
-    end
-    return total, loaded, fired, failed
 end
 
 local function short(value, width)
@@ -1694,52 +1330,36 @@ local function drawMonitor(force)
             return
         end
 
-        local controlsLocked = firePlan ~= nil or loadPlan ~= nil
-        local function optionColor(normalColor)
-            return controlsLocked and colors.lightGray or normalColor
-        end
-
-        local transmitSummary = lastSentType
-            and string.format(" TX:%d/%s>%s", sentPacketCount,
-                lastSentType:sub(1, 9), tostring(lastSentRecipient))
-            or " TX:0/-"
-        monitorWriteAt(2, 1, short(
-            "PHOENIX FIRE CONTROL AUTH:"
-                .. (CONFIG.security_enabled and "ON" or "OFF")
-                .. transmitSummary,
-            width - 2), colors.yellow, colors.black)
+        monitorWriteAt(2, 1, short("PHOENIX FIRE CONTROL  AUTH:" .. (CONFIG.security_enabled and "ON" or "OFF"), width - 2), colors.yellow, colors.black)
         local half = math.floor(width / 2)
         if aimMode == "manual" then
             local sideThird = math.floor((width - 2) / 3)
-            addMonitorButton("side_port", 2, 2, 1 + sideThird, 4,
-                "PORT", sideMode == "port", optionColor(colors.blue))
-            addMonitorButton("side_starboard", 2 + sideThird, 2, 1 + sideThird * 2, 4,
-                "STARBOARD", sideMode == "starboard", optionColor(colors.blue))
-            addMonitorButton("side_bow", 2 + sideThird * 2, 2, width - 1, 4,
-                "BOW", sideMode == "bow", optionColor(colors.blue))
+            addMonitorButton("side_port", 2, 3, 1 + sideThird, 5,
+                "PORT", sideMode == "port", colors.blue)
+            addMonitorButton("side_starboard", 2 + sideThird, 3, 1 + sideThird * 2, 5,
+                "STARBOARD", sideMode == "starboard", colors.blue)
+            addMonitorButton("side_bow", 2 + sideThird * 2, 3, width - 1, 5,
+                "BOW", sideMode == "bow", colors.blue)
         else
-            addMonitorButton("side_port", 2, 2, half - 1, 4,
-                "PORT", sideMode == "port", optionColor(colors.blue))
-            addMonitorButton("side_starboard", half + 1, 2, width - 1, 4,
-                "STARBOARD", sideMode == "starboard", optionColor(colors.blue))
+            addMonitorButton("side_port", 2, 3, half - 1, 5,
+                "PORT", sideMode == "port", colors.blue)
+            addMonitorButton("side_starboard", half + 1, 3, width - 1, 5,
+                "STARBOARD", sideMode == "starboard", colors.blue)
         end
-        local third = math.floor((width - 2) / 3)
-        addMonitorButton("mode_ripple", 2, 5, 1 + third, 7,
-            "RIPPLE", fireMode == "ripple", optionColor(colors.purple))
-        addMonitorButton("mode_salvo", 2 + third, 5, 1 + third * 2, 7,
-            "SALVO", fireMode == "salvo", optionColor(colors.purple))
-        addMonitorButton("mode_single", 2 + third * 2, 5, width - 1, 7,
-            "SINGLE", fireMode == "single", optionColor(colors.purple))
-
-        local quarter = math.floor((width - 2) / 4)
-        addMonitorButton("count_1", 2, 8, 1 + quarter, 10,
-            "1 GUN", gunCountMode == 1, optionColor(colors.green))
-        addMonitorButton("count_5", 2 + quarter, 8, 1 + quarter * 2, 10,
-            "5 GUNS", gunCountMode == 5, optionColor(colors.green))
-        addMonitorButton("count_10", 2 + quarter * 2, 8, 1 + quarter * 3, 10,
-            "10 GUNS", gunCountMode == 10, optionColor(colors.green))
-        addMonitorButton("count_full", 2 + quarter * 3, 8, width - 1, 10,
-            "FULL", gunCountMode == "full", optionColor(colors.green))
+        if aimMode == "manual" then
+            local third = math.floor((width - 2) / 3)
+            addMonitorButton("mode_ripple", 2, 7, 1 + third, 9,
+                "RIPPLE", fireMode == "ripple", colors.purple)
+            addMonitorButton("mode_salvo", 2 + third, 7, 1 + third * 2, 9,
+                "SALVO", fireMode == "salvo", colors.purple)
+            addMonitorButton("mode_single", 2 + third * 2, 7, width - 1, 9,
+                "SINGLE", fireMode == "single", colors.purple)
+        else
+            addMonitorButton("mode_ripple", 2, 7, half - 1, 9,
+                "RIPPLE", fireMode == "ripple", colors.purple)
+            addMonitorButton("mode_salvo", half + 1, 7, width - 1, 9,
+                "SALVO", fireMode == "salvo", colors.purple)
+        end
 
         addMonitorButton("ripple_minus", 2, 11, 7, 13, "-5S", false, colors.gray)
         addMonitorButton("ripple_plus", 9, 11, 14, 13, "+5S", false, colors.gray)
@@ -1747,103 +1367,73 @@ local function drawMonitor(force)
             math.max(1, width - 29)), colors.white, colors.black)
         addMonitorButton("aim_mode", math.max(18, width - 11), 11, width - 1, 13,
             aimMode == "manual" and "MANUAL" or "AUTO", true,
-            optionColor(aimMode == "manual" and colors.orange or colors.cyan))
+            aimMode == "manual" and colors.orange or colors.cyan)
 
         if aimMode == "manual" then
-            addMonitorButton("manual_yaw_minus", 2, 14, 1 + quarter, 16, "YAW-", false, colors.gray)
-            addMonitorButton("manual_yaw_plus", 2 + quarter, 14, 1 + quarter * 2, 16, "YAW+", false, colors.gray)
-            addMonitorButton("manual_elev_minus", 2 + quarter * 2, 14, 1 + quarter * 3, 16, "EL-", false, colors.gray)
-            addMonitorButton("manual_elev_plus", 2 + quarter * 3, 14, width - 1, 16, "EL+", false, colors.gray)
-            addMonitorButton("projectile", 2, 17, width - 1, 19,
-                short("SHELL: " .. string.upper(CONFIG.projectile_name), width - 4),
-                true, optionColor(colors.brown))
+            local quarter = math.floor((width - 2) / 4)
+            addMonitorButton("manual_yaw_minus", 2, 15, 1 + quarter, 17, "YAW-", false, colors.gray)
+            addMonitorButton("manual_yaw_plus", 2 + quarter, 15, 1 + quarter * 2, 17, "YAW+", false, colors.gray)
+            addMonitorButton("manual_elev_minus", 2 + quarter * 2, 15, 1 + quarter * 3, 17, "EL-", false, colors.gray)
+            addMonitorButton("manual_elev_plus", 2 + quarter * 3, 15, width - 1, 17, "EL+", false, colors.gray)
         else
-            addMonitorButton("projectile", 2, 17, half - 1, 19,
-                short("PROJ: " .. string.upper(CONFIG.projectile_name), half - 3),
-                true, optionColor(colors.brown))
-            addMonitorButton("arc", half + 1, 17, width - 1, 19,
-                string.upper(arc) .. " ARC", true, optionColor(colors.cyan))
+            addMonitorButton("projectile", 2, 15, half - 1, 17,
+                short("PROJ: " .. string.upper(CONFIG.projectile_name), half - 3), true, colors.brown)
+            addMonitorButton("arc", half + 1, 15, width - 1, 17,
+                string.upper(arc) .. " ARC", true, colors.cyan)
         end
 
         local layout = analyzeLayout()
         local knownCount = 0
         for _ in pairs(nodes) do knownCount = knownCount + 1 end
-        local informationRow = 20
         if aimMode == "manual" then
             local setting = manualAim[sideMode]
-            monitorWriteAt(2, informationRow, short(string.format("MANUAL %s  Yaw %+.1f  Elev %+.1f",
+            monitorWriteAt(2, 19, short(string.format("MANUAL %s  Yaw %+.1f  Elev %+.1f",
                 string.upper(sideMode), setting.yaw, setting.elevation), width - 2), colors.orange, colors.black)
         elseif target then
-            monitorWriteAt(2, informationRow, short(string.format("Target %.1f, %.1f, %.1f", target.x, target.y, target.z), width - 2), colors.white, colors.black)
+            monitorWriteAt(2, 19, short(string.format("Target %.1f, %.1f, %.1f", target.x, target.y, target.z), width - 2), colors.white, colors.black)
         else
-            monitorWriteAt(2, informationRow, "NO TARGET - use T on computer", colors.red, colors.black)
+            monitorWriteAt(2, 19, "NO TARGET - use T on computer", colors.red, colors.black)
         end
         if lastSolution and lastSolution.manual then
-            monitorWriteAt(2, informationRow + 1, "Direct broadside aim - no ballistic solution", colors.orange, colors.black)
+            monitorWriteAt(2, 20, "Direct broadside aim - no ballistic solution", colors.orange, colors.black)
         elseif lastSolution then
-            monitorWriteAt(2, informationRow + 1, short(string.format("v0 %.2f  Yaw %.2f  Elev %.2f  Range %.0f", CONFIG.muzzle_speed, lastSolution.worldYaw, lastSolution.pitch, lastSolution.range), width - 2), colors.lime, colors.black)
+            monitorWriteAt(2, 20, short(string.format("v0 %.2f  Yaw %.2f  Elev %.2f  Range %.0f", CONFIG.muzzle_speed, lastSolution.worldYaw, lastSolution.pitch, lastSolution.range), width - 2), colors.lime, colors.black)
         else
-            monitorWriteAt(2, informationRow + 1, short("No solution: " .. tostring(lastSolutionError), width - 2), colors.orange, colors.black)
+            monitorWriteAt(2, 20, short("No solution: " .. tostring(lastSolutionError), width - 2), colors.orange, colors.black)
         end
         if layout then
-            monitorWriteAt(2, informationRow + 2, short(string.format("Online %d/%d P:%d S:%d Bow:%d",
+            monitorWriteAt(2, 21, short(string.format("Online %d/%d P:%d S:%d Bow:%d",
                 #layout.nodes, knownCount, layout.counts.port,
                 layout.counts.starboard, layout.counts.bow), width - 2), colors.lightGray, colors.black)
-            monitorWriteAt(2, informationRow + 3, "ID   BATTERY   STATION  AIM / LOADER", colors.lightGray, colors.black)
-            local row = informationRow + 4
+            monitorWriteAt(2, 22, "ID   BATTERY   STATION  STATE", colors.lightGray, colors.black)
+            local row = 23
             for _, node in ipairs(layout.nodes) do
                 if row > height - 5 then break end
-                local state = node.error and "LIMIT"
-                    or node.loaderError and "LOAD ERR"
-                    or node.loadedProjectile and ("LOADED " .. node.loadedProjectile)
-                    or node.loaderState or "READY"
-                local color = (node.error or node.loaderError) and colors.orange or colors.lime
+                local state = node.error and "LIMIT" or "READY"
+                local color = node.error and colors.orange or colors.lime
                 monitorWriteAt(2, row, short(string.format("%-4d %-9s %7.2f  %s",
                     node.id, node.batteryLabel, node.station, state), width - 2), color, colors.black)
                 row = row + 1
             end
         else
-            monitorWriteAt(2, informationRow + 2, short("No active guns: " .. tostring(select(2, analyzeLayout())), width - 2), colors.red, colors.black)
+            monitorWriteAt(2, 21, short("No active guns: " .. tostring(select(2, analyzeLayout())), width - 2), colors.red, colors.black)
             local known = knownNodes()
             if known[1] then
-                monitorWriteAt(2, informationRow + 3, short(string.format("Gun %d: %s", known[1].id, nodeInactiveReason(known[1]) or "inactive"), width - 2), colors.orange, colors.black)
+                monitorWriteAt(2, 22, short(string.format("Gun %d: %s", known[1].id, nodeInactiveReason(known[1]) or "inactive"), width - 2), colors.orange, colors.black)
             end
         end
 
         monitorWriteAt(2, height - 4, short(statusLine, width - 2), colors.yellow, colors.black)
-        local bottomThird = math.floor((width - 2) / 3)
-        local loadLabel = "LOAD"
-        if loadPlan then
-            loadLabel = loadPlan.phase == "ready" and "LOADED" or "LOADING..."
-        elseif firePlan then
-            loadLabel = firePlan.phase == "loading" and "LOADING..." or "LOCKED"
-        end
-        addMonitorButton("load", 2, height - 3, 1 + bottomThird, height - 1,
-            loadLabel,
-            not firePlan and not loadPlan, colors.brown)
-        addMonitorButton("emergency_abort", 2 + bottomThird, height - 3,
-            1 + bottomThird * 2, height - 1, "EMERGENCY ABORT", true, colors.red)
+        addMonitorButton("cancel", 2, height - 3, half - 1, height - 1, "CANCEL", firePlan ~= nil, colors.orange)
         local fireLabel = "FIRE " .. string.upper(sideMode)
-        local fireEnabled = firePlan == nil
-        if firePlan then
-            local total, loaded, fired, failed = planProgress(firePlan)
-            if firePlan.phase == "loading" then
-                fireLabel = string.format("WAIT %d/%d", loaded + failed, total)
-            else
-                fireLabel = string.format("FIRING %d/%d", fired + failed, total)
-            end
-        elseif loadPlan then
-            local total, loaded, _, failed = planProgress(loadPlan)
-            fireLabel = loadPlan.phase == "ready"
-                and string.format("FIRE %d READY", loaded)
-                or string.format("ARM FIRE %d/%d", loaded + failed, total)
-        elseif fireMode == "single" and layout then
+        if not firePlan and aimMode == "manual" and fireMode == "single" and layout then
             local eligible = selectedGuns(layout, true)
             local nextGun = nextSingleGun(eligible, sideMode)
             fireLabel = nextGun and ("FIRE " .. nextGun.batteryLabel) or "NO READY GUN"
         end
-        addMonitorButton("fire", 2 + bottomThird * 2, height - 3, width - 1, height - 1,
-            fireLabel, fireEnabled, colors.red)
+        addMonitorButton("fire", half + 1, height - 3, width - 1, height - 1,
+            firePlan and "ORDER ACTIVE" or fireLabel,
+            not firePlan, colors.red)
     end)
     if not ok then
         monitor, monitorName = nil, nil
@@ -1857,21 +1447,12 @@ local function handleMonitorTouch(side, x, y)
     if not monitorName or side ~= monitorName then return end
     for _, button in ipairs(monitorButtons) do
         if x >= button.x1 and x <= button.x2 and y >= button.y1 and y <= button.y2 then
-            local controlsLocked = firePlan ~= nil or loadPlan ~= nil
-            if controlsLocked
-                and button.id ~= "fire"
-                and button.id ~= "emergency_abort" then
-                statusLine = "Order locked: only FIRE or EMERGENCY ABORT is available"
-            elseif button.id == "side_port" then setSide("port")
+            if button.id == "side_port" then setSide("port")
             elseif button.id == "side_starboard" then setSide("starboard")
             elseif button.id == "side_bow" then setSide("bow")
             elseif button.id == "mode_ripple" then setFireMode("ripple")
             elseif button.id == "mode_salvo" then setFireMode("salvo")
             elseif button.id == "mode_single" then setFireMode("single")
-            elseif button.id == "count_1" then setGunCountMode(1)
-            elseif button.id == "count_5" then setGunCountMode(5)
-            elseif button.id == "count_10" then setGunCountMode(10)
-            elseif button.id == "count_full" then setGunCountMode("full")
             elseif button.id == "ripple_minus" then adjustRipple(-CONFIG.ripple_adjust_s)
             elseif button.id == "ripple_plus" then adjustRipple(CONFIG.ripple_adjust_s)
             elseif button.id == "aim_mode" then toggleAimMode()
@@ -1881,8 +1462,7 @@ local function handleMonitorTouch(side, x, y)
             elseif button.id == "manual_elev_plus" then adjustManualAim(0, CONFIG.manual_elevation_step_deg)
             elseif button.id == "arc" then toggleArc()
             elseif button.id == "projectile" then cycleProjectile()
-            elseif button.id == "load" then beginLoadOrder()
-            elseif button.id == "emergency_abort" then emergencyAbort()
+            elseif button.id == "cancel" then cancelFirePlan()
             elseif button.id == "fire" then beginFireOrder() end
             drawMonitor(true)
             return
@@ -1918,11 +1498,8 @@ local function draw()
     else
         print("Target: not set (press T)")
     end
-    print(short(string.format("Aim:%s Fire:%s Count:%s Projectile:%s Auth:%s TX:%d/%s>%s",
-        aimMode, fireMode, gunCountMode == "full" and "FULL" or tostring(gunCountMode),
-        CONFIG.projectile_name, CONFIG.security_enabled and "ON" or "OFF",
-        sentPacketCount, tostring(lastSentType or "-"),
-        tostring(lastSentRecipient or "-")), width))
+    print(string.format("Aim:%s Fire:%s Projectile:%s Auth:%s",
+        aimMode, fireMode, CONFIG.projectile_name, CONFIG.security_enabled and "ON" or "OFF"))
     print(short(string.format("Fixed 1ch/5u/full cart v0:%.2f Drag:%s Solve:%dms Ripple:%.1fs",
         CONFIG.muzzle_speed, CONFIG.drag_enabled and "on" or "off",
         lastSolveMs, CONFIG.ripple_duration_s), width))
@@ -1946,13 +1523,9 @@ local function draw()
             local slotText = node.batteryRole == "bow_chaser"
                 and ("BC/" .. tostring(node.chaserNumber))
                 or string.format("%d/%d", node.deckNumber, node.gunNumber)
-            local nodeState = node.error and "LIMIT"
-                or node.loaderError and "LOAD ERR"
-                or node.loadedProjectile and ("LOADED " .. node.loadedProjectile)
-                or node.loaderState or "OK"
             print(string.format("%-3d %-9s %7.2f  %-5s %s",
                 node.id, short(node.batteryLabel, 9), node.station,
-                slotText, nodeState))
+                slotText, node.error and "LIMIT" or "OK"))
         end
     else
         local room = math.max(0, height - 14)
@@ -1965,7 +1538,7 @@ local function draw()
         end
     end
     term.setCursorPos(1, height)
-    write(short("D aim | X exact | F LOAD+FIRE | L LOAD | C EMERGENCY | G count | M mode | Q quit", width))
+    write(short("D auto/manual | arrows aim | X exact | F FIRE | S side | M ripple/salvo/single | Q quit", width))
     drawMonitor(false)
 end
 
@@ -1984,9 +1557,7 @@ local function tick()
     elseif aimMode == "automatic" and not target then
         lastSolution, lastSolutionError = nil, "No target"
     end
-    serviceLoadPlan()
     serviceFirePlan()
-    serviceEmergencyAbort()
     draw()
 end
 
@@ -2001,11 +1572,8 @@ local function main()
     ensureModem()
     sendDiscovery(true)
     ensureMonitor()
-    -- Arm the periodic tick only after the initial monitor redraw. Monitor
-    -- writes are yielding peripheral calls and may otherwise consume the timer
-    -- event before the main loop begins waiting for it.
-    draw()
     local timer = os.startTimer(0.10)
+    draw()
     while running do
         local event, a, b, c = os.pullEvent()
         if event == "rednet_message" and c == CONFIG.protocol then
@@ -2018,32 +1586,16 @@ local function main()
             sendDiscovery(true)
             ensureMonitor()
             drawMonitor(true)
-            timer = os.startTimer(0.10)
         elseif event == "monitor_touch" then
             handleMonitorTouch(a, b, c)
-            -- handleMonitorTouch performs a full monitor redraw. Start a fresh
-            -- tick afterward in case that redraw consumed the prior timer.
-            timer = os.startTimer(0.10)
         elseif event == "timer" and a == timer then
             tick()
             timer = os.startTimer(0.10)
         elseif event == "key" then
-            local controlsLocked = firePlan ~= nil or loadPlan ~= nil
-            if a == keys.q then
-                if firePlan or loadPlan then cancelAllOrders("Orders cancelled; shutting down") end
-                running = false
-            elseif a == keys.c then
-                emergencyAbort()
-            elseif controlsLocked then
-                if a == keys.f then
-                    beginFireOrder()
-                else
-                    statusLine = "Order locked: only F FIRE, C EMERGENCY, or Q quit"
-                end
-            elseif a == keys.t then promptTarget()
-            elseif a == keys.r then promptRipple()
-            elseif a == keys.p then promptProjectile()
-            elseif a == keys.x then promptManualAim()
+            if a == keys.t then promptTarget(); timer = os.startTimer(0.10)
+            elseif a == keys.r then promptRipple(); timer = os.startTimer(0.10)
+            elseif a == keys.p then promptProjectile(); timer = os.startTimer(0.10)
+            elseif a == keys.x then promptManualAim(); timer = os.startTimer(0.10)
             elseif a == keys.d then toggleAimMode()
             elseif a == keys.left then adjustManualAim(-CONFIG.manual_yaw_step_deg, 0)
             elseif a == keys.right then adjustManualAim(CONFIG.manual_yaw_step_deg, 0)
@@ -2051,13 +1603,14 @@ local function main()
             elseif a == keys.up then adjustManualAim(0, CONFIG.manual_elevation_step_deg)
             elseif a == keys.s then cycleSide()
             elseif a == keys.m then cycleFireMode()
-            elseif a == keys.g then cycleGunCountMode()
             elseif a == keys.a then toggleArc()
             elseif a == keys.f then beginFireOrder()
-            elseif a == keys.l then beginLoadOrder()
+            elseif a == keys.c then cancelFirePlan()
+            elseif a == keys.q then
+                if firePlan then cancelFirePlan("Fire order cancelled; shutting down") end
+                running = false
             end
             draw()
-            if running then timer = os.startTimer(0.10) end
         end
     end
     term.clear(); term.setCursorPos(1, 1)
