@@ -34,8 +34,11 @@ local CONFIG = {
     -- Required battery identity. Deck 1 is topmost; gun 1 is nearest the bow.
     -- Central converts these simple values into the irregular horizontal order.
     -- Recommended quick form: "P-1-1", "S-3-10", etc. When set, it fills the
-    -- expanded side/deck/gun fields below.
+    -- expanded side/deck/gun fields below. If this and the expanded fields are
+    -- unset, first startup prompts for an entry such as "S 3 4" and remembers
+    -- it in battery_identity_file.
     battery_id = nil,
+    battery_identity_file = "/.phoenix_artillery_battery",
     battery_role = "broadside",
     side_override = nil,
     deck_number = nil,
@@ -121,6 +124,13 @@ local CARTRIDGE_ITEM = {
     displayNames = {"Big Cartridge"},
 }
 
+local DECK_GUN_COUNTS = {
+    [1] = 8,
+    [2] = 15,
+    [3] = 14,
+    [4] = 16,
+}
+
 -- Side profiles inherit every omitted value from CONFIG above. This lets the
 -- same program be installed on every gun while port and starboard use different
 -- mount-frame mappings. Uncomment and tune only the values that differ.
@@ -192,41 +202,177 @@ local function nowMs()
     return os.epoch("utc")
 end
 
-local function initializeBatteryIdentity()
-    if CONFIG.battery_id == nil or CONFIG.battery_id == "" then
-        assignedSide = CONFIG.side_override or assignedSide
-        return true
-    end
-    if type(CONFIG.battery_id) ~= "string" then return nil, "battery_id must be a string" end
-    local chaserSide, chaserText = CONFIG.battery_id:match(
-        "^%s*[Bb][Cc]%s*%-%s*([%a]+)%s*%-%s*(%d+)%s*$"
+local function sideFromToken(token)
+    token = tostring(token or ""):lower()
+    if token == "p" or token == "port" then return "port", "P" end
+    if token == "s" or token == "starboard" then return "starboard", "S" end
+    return nil
+end
+
+local function parseBatteryIdentity(value)
+    if type(value) ~= "string" then return nil, "identity must be text" end
+    local separators = "[%s_%-]+"
+    local chaserSide, chaserText = value:match(
+        "^%s*[Bb][Cc]" .. separators .. "([%a]+)"
+            .. separators .. "(%d+)%s*$"
     )
     if chaserSide then
-        chaserSide = chaserSide:lower()
-        local side = (chaserSide == "p" or chaserSide == "port") and "port"
-            or (chaserSide == "s" or chaserSide == "starboard") and "starboard" or nil
-        if not side then return nil, "bow chaser side must be P/PORT or S/STARBOARD" end
-        CONFIG.battery_role = "bow_chaser"
-        CONFIG.side_override = side
-        CONFIG.chaser_number = tonumber(chaserText)
-        CONFIG.deck_number, CONFIG.gun_number = nil, nil
-        assignedSide = side
+        local side, sideLetter = sideFromToken(chaserSide)
+        if not side then
+            return nil, "bow-chaser side must be P/PORT or S/STARBOARD"
+        end
+        local chaserNumber = tonumber(chaserText)
+        if not chaserNumber or chaserNumber < 1
+            or chaserNumber % 1 ~= 0 then
+            return nil, "bow-chaser number must be a positive whole number"
+        end
+        return {
+            canonical = string.format("BC-%s-%d", sideLetter, chaserNumber),
+            role = "bow_chaser",
+            side = side,
+            chaserNumber = chaserNumber,
+        }
+    end
+
+    local sideToken, deckText, gunText = value:match(
+        "^%s*([%a]+)" .. separators .. "(%d+)"
+            .. separators .. "(%d+)%s*$"
+    )
+    if not sideToken then
+        return nil, "use S 3 4, P-1-1, BC S 1, or BC-P-1"
+    end
+    local side, sideLetter = sideFromToken(sideToken)
+    if not side then return nil, "side must be P/PORT or S/STARBOARD" end
+    local deckNumber, gunNumber = tonumber(deckText), tonumber(gunText)
+    local maximum = DECK_GUN_COUNTS[deckNumber]
+    if not maximum then return nil, "deck must be 1, 2, 3, or 4" end
+    if gunNumber < 1 or gunNumber > maximum or gunNumber % 1 ~= 0 then
+        return nil, string.format(
+            "deck %d gun number must be 1-%d", deckNumber, maximum)
+    end
+    return {
+        canonical = string.format("%s-%d-%d", sideLetter, deckNumber, gunNumber),
+        role = "broadside",
+        side = side,
+        deckNumber = deckNumber,
+        gunNumber = gunNumber,
+    }
+end
+
+local function applyBatteryIdentity(identity)
+    CONFIG.battery_id = identity.canonical
+    CONFIG.battery_role = identity.role
+    CONFIG.side_override = identity.side
+    CONFIG.deck_number = identity.deckNumber
+    CONFIG.gun_number = identity.gunNumber
+    CONFIG.chaser_number = identity.chaserNumber
+    assignedSide = identity.side
+end
+
+local function configuredExpandedIdentity()
+    local sideLetter = CONFIG.side_override == "port" and "P"
+        or CONFIG.side_override == "starboard" and "S" or nil
+    if not sideLetter then return nil end
+    if CONFIG.battery_role == "bow_chaser" and CONFIG.chaser_number ~= nil then
+        return parseBatteryIdentity(string.format(
+            "BC-%s-%s", sideLetter, tostring(CONFIG.chaser_number)))
+    end
+    if CONFIG.deck_number ~= nil and CONFIG.gun_number ~= nil then
+        return parseBatteryIdentity(string.format(
+            "%s-%s-%s", sideLetter,
+            tostring(CONFIG.deck_number), tostring(CONFIG.gun_number)))
+    end
+    return nil
+end
+
+local function readSavedBatteryIdentity()
+    local path = CONFIG.battery_identity_file
+    if type(path) ~= "string" or path == "" then
+        return nil, "battery_identity_file must be a nonempty path"
+    end
+    local ok, result, readError = pcall(function()
+        if not fs.exists(path) then return nil end
+        local reader = fs.open(path, "r")
+        if not reader then return nil, "cannot open saved identity" end
+        local value = reader.readAll()
+        reader.close()
+        return value
+    end)
+    if not ok then return nil, "cannot read saved identity: " .. tostring(result) end
+    if readError then return nil, readError end
+    if result == nil then return nil end
+    local identity, parseError = parseBatteryIdentity(result)
+    if not identity then
+        return nil, "saved identity is invalid: " .. tostring(parseError)
+    end
+    return identity
+end
+
+local function saveBatteryIdentity(identity)
+    local ok, errorMessage = pcall(function()
+        local writer = assert(fs.open(CONFIG.battery_identity_file, "w"))
+        writer.write(identity.canonical .. "\n")
+        writer.close()
+    end)
+    if not ok then
+        return nil, "cannot save gun position: " .. tostring(errorMessage)
+    end
+    return true
+end
+
+local function promptForBatteryIdentity(previousError)
+    while true do
+        term.clear()
+        term.setCursorPos(1, 1)
+        print("=== Phoenix Gun Position Setup ===")
+        print("")
+        print("Enter: SIDE DECK GUN")
+        print("Example: S 3 4")
+        print("  P = port, S = starboard")
+        print("  Deck 1 is topmost")
+        print("  Gun 1 is nearest the bow")
+        print("")
+        print("Bow chaser example: BC S 1")
+        print("")
+        if previousError then
+            printError(tostring(previousError))
+            previousError = nil
+        end
+        write("Gun position: ")
+        local identity, parseError = parseBatteryIdentity(read())
+        if identity then
+            local saved, saveError = saveBatteryIdentity(identity)
+            if not saved then return nil, saveError end
+            return identity
+        end
+        previousError = parseError
+    end
+end
+
+local function initializeBatteryIdentity()
+    if CONFIG.battery_id ~= nil and CONFIG.battery_id ~= "" then
+        local identity, parseError = parseBatteryIdentity(CONFIG.battery_id)
+        if not identity then return nil, "battery_id: " .. tostring(parseError) end
+        applyBatteryIdentity(identity)
         return true
     end
-    local sideToken, deckText, gunText = CONFIG.battery_id:match(
-        "^%s*([%a]+)%s*%-%s*(%d+)%s*%-%s*(%d+)%s*$"
-    )
-    if not sideToken then return nil, "use P-1-1, S-1-1, BC-P-1, or BC-S-1" end
-    sideToken = sideToken:lower()
-    local side = (sideToken == "p" or sideToken == "port") and "port"
-        or (sideToken == "s" or sideToken == "starboard") and "starboard" or nil
-    if not side then return nil, "battery_id side must be P/PORT or S/STARBOARD" end
-    CONFIG.battery_role = "broadside"
-    CONFIG.side_override = side
-    CONFIG.deck_number = tonumber(deckText)
-    CONFIG.gun_number = tonumber(gunText)
-    CONFIG.chaser_number = nil
-    assignedSide = side
+
+    local expandedIdentity, expandedError = configuredExpandedIdentity()
+    if expandedError then return nil, "expanded battery identity: " .. tostring(expandedError) end
+    if expandedIdentity then
+        applyBatteryIdentity(expandedIdentity)
+        return true
+    end
+
+    local savedIdentity, savedError = readSavedBatteryIdentity()
+    if savedIdentity then
+        applyBatteryIdentity(savedIdentity)
+        return true
+    end
+
+    local promptedIdentity, promptError = promptForBatteryIdentity(savedError)
+    if not promptedIdentity then return nil, promptError end
+    applyBatteryIdentity(promptedIdentity)
     return true
 end
 
