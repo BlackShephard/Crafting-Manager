@@ -734,6 +734,7 @@ end
 local function moveOneToDepot(specification, description)
     local source, depotOrError = resolveLoaderInventories(false)
     if not source then return nil, depotOrError or loaderError end
+    local depot = depotOrError
     local listOk, contents = pcall(source.list)
     if not listOk or type(contents) ~= "table" then
         loaderOnline = false
@@ -759,15 +760,42 @@ local function moveOneToDepot(specification, description)
         return nil, "No " .. description .. " in " .. loaderSourceName
             .. (#available > 0 and ("; found " .. table.concat(available, ", ")) or "; source empty")
     end
-    local pushOk, moved = pcall(source.pushItems, loaderDepotName, matchingSlot, 1)
-    if not pushOk then
-        loaderOnline = false
-        return nil, "pushItems failed: " .. tostring(moved)
+    local pushOk, pushed = pcall(
+        source.pushItems, loaderDepotName, matchingSlot, 1
+    )
+    if pushOk and pushed == 1 then return true end
+
+    -- Some CC peripheral layouts expose a directly attached source as "left"
+    -- while the depot has a wired-network name such as "create:depot_0".
+    -- source.pushItems cannot always resolve across that boundary, but the
+    -- reverse operation may still be routable by the depot.
+    local pullAvailable = type(depot.pullItems) == "function"
+    local pullOk, pulled = false, "pullItems unavailable"
+    if pullAvailable then
+        pullOk, pulled = pcall(
+            depot.pullItems, loaderSourceName, matchingSlot, 1
+        )
+        if pullOk and pulled == 1 then return true end
     end
-    if moved ~= 1 then
+
+    if pushOk and tonumber(pushed) == 0
+        and pullAvailable and pullOk and tonumber(pulled) == 0 then
         return nil, "Depot occupied or refused " .. description
     end
-    return true
+
+    loaderOnline = false
+    local pushResult = pushOk
+        and ("moved " .. tostring(pushed))
+        or tostring(pushed)
+    local pullResult = not pullAvailable and "method unavailable"
+        or pullOk and ("moved " .. tostring(pulled))
+        or tostring(pulled)
+    return nil, string.format(
+        "Inventory transfer failed. push %s -> %s: %s; pull %s <- %s: %s. "
+            .. "Connect BOTH source and depot by wired modems to the same cable network.",
+        tostring(loaderSourceName), tostring(loaderDepotName), pushResult,
+        tostring(loaderDepotName), tostring(loaderSourceName), pullResult
+    )
 end
 
 local function openWirelessModem()
