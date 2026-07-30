@@ -149,6 +149,14 @@ local sentPacketCount = 0
 local lastSentType = nil
 local lastSentRecipient = nil
 local receivedPacketCount = 0
+local networkInbox = {}
+local pendingHelloPackets = {}
+local pendingStatusPackets = {}
+local pendingAimAckPackets = {}
+local networkQueueDrops = 0
+local networkHandlerError = nil
+local NETWORK_INBOX_EVENT = "phoenix.artillery.central_network_inbox"
+local NETWORK_QUEUE_LIMIT = 1024
 
 local function nowMs()
     return os.epoch("utc")
@@ -1018,6 +1026,86 @@ local function handleNetwork(sender, message)
     end
 end
 
+local function sameCentralPacket(left, right)
+    if not left or not right then return false end
+    local leftMessage, rightMessage = left.message, right.message
+    if type(leftMessage) ~= "table" or type(rightMessage) ~= "table" then return false end
+    return left.sender == right.sender
+        and leftMessage.type == rightMessage.type
+        and leftMessage.orderId == rightMessage.orderId
+        and leftMessage.ackType == rightMessage.ackType
+end
+
+local function receiveCentralNetworkMessage(sender, message, protocol)
+    if protocol ~= CONFIG.protocol then return end
+    receivedPacketCount = receivedPacketCount + 1
+    local packet = {sender = sender, message = message}
+    local messageType = type(message) == "table" and message.type or nil
+    if messageType == "hello" then
+        pendingHelloPackets[sender] = packet
+    elseif messageType == "status" then
+        pendingStatusPackets[sender] = packet
+    elseif messageType == "ack" and message.ackType == "aim" then
+        pendingAimAckPackets[sender] = packet
+    else
+        -- Central retries commands, so nodes may repeat ACKs. Replace the
+        -- queued duplicate instead of allowing retries to crowd out a final
+        -- LOADED/FIRED/failed response.
+        for index, queued in ipairs(networkInbox) do
+            if sameCentralPacket(queued, packet) then
+                networkInbox[index] = packet
+                os.queueEvent(NETWORK_INBOX_EVENT)
+                return
+            end
+        end
+        if #networkInbox < NETWORK_QUEUE_LIMIT then
+            networkInbox[#networkInbox + 1] = packet
+        else
+            networkQueueDrops = networkQueueDrops + 1
+        end
+    end
+    os.queueEvent(NETWORK_INBOX_EVENT)
+end
+
+local function popPacketMap(packetMap)
+    local sender, packet = next(packetMap)
+    if sender ~= nil then packetMap[sender] = nil end
+    return packet
+end
+
+local function nextCentralNetworkPacket()
+    if #networkInbox > 0 then return table.remove(networkInbox, 1) end
+    return popPacketMap(pendingHelloPackets)
+        or popPacketMap(pendingStatusPackets)
+        or popPacketMap(pendingAimAckPackets)
+end
+
+local function centralNetworkPending()
+    return #networkInbox > 0
+        or next(pendingHelloPackets) ~= nil
+        or next(pendingStatusPackets) ~= nil
+        or next(pendingAimAckPackets) ~= nil
+end
+
+local function serviceCentralNetworkInbox(maximum)
+    local handled = 0
+    while handled < (maximum or 64) do
+        local packet = nextCentralNetworkPacket()
+        if not packet then break end
+        local ok, errorMessage = pcall(
+            handleNetwork, packet.sender, packet.message
+        )
+        if not ok then
+            networkHandlerError = tostring(errorMessage)
+            statusLine = "NETWORK HANDLER: " .. networkHandlerError
+        else
+            networkHandlerError = nil
+        end
+        handled = handled + 1
+    end
+    if centralNetworkPending() then os.queueEvent(NETWORK_INBOX_EVENT) end
+end
+
 local function sendAim(layout, solution)
     local orderId = "aim-" .. tostring(nowMs())
     local guns = {}
@@ -1713,10 +1801,11 @@ local function drawMonitor(force)
         end
 
         local transmitSummary = lastSentType
-            and string.format(" TX:%d/%s>%s RX:%d", sentPacketCount,
+            and string.format(" TX:%d/%s>%s RX:%d Q:%d D:%d", sentPacketCount,
                 lastSentType:sub(1, 9), tostring(lastSentRecipient),
-                receivedPacketCount)
-            or string.format(" TX:0/- RX:%d", receivedPacketCount)
+                receivedPacketCount, #networkInbox, networkQueueDrops)
+            or string.format(" TX:0/- RX:%d Q:%d D:%d",
+                receivedPacketCount, #networkInbox, networkQueueDrops)
         monitorWriteAt(2, 1, short(
             "PHOENIX FIRE CONTROL AUTH:"
                 .. (CONFIG.security_enabled and "ON" or "OFF")
@@ -1932,11 +2021,12 @@ local function draw()
     else
         print("Target: not set (press T)")
     end
-    print(short(string.format("Aim:%s Fire:%s Count:%s Projectile:%s Auth:%s TX:%d/%s>%s RX:%d",
+    print(short(string.format("Aim:%s Fire:%s Count:%s Projectile:%s Auth:%s TX:%d/%s>%s RX:%d Q:%d D:%d",
         aimMode, fireMode, gunCountMode == "full" and "FULL" or tostring(gunCountMode),
         CONFIG.projectile_name, CONFIG.security_enabled and "ON" or "OFF",
         sentPacketCount, tostring(lastSentType or "-"),
-        tostring(lastSentRecipient or "-"), receivedPacketCount), width))
+        tostring(lastSentRecipient or "-"), receivedPacketCount,
+        #networkInbox, networkQueueDrops), width))
     print(short(string.format("Fixed 1ch/5u/full cart v0:%.2f Drag:%s Solve:%dms Ripple:%.1fs",
         CONFIG.muzzle_speed, CONFIG.drag_enabled and "on" or "off",
         lastSolveMs, CONFIG.ripple_duration_s), width))
@@ -1984,6 +2074,10 @@ local function draw()
 end
 
 local function tick()
+    -- Drain captured rednet traffic before calculating aim or servicing plans.
+    -- The receiver runs independently, so monitor/ballistic yields cannot lose
+    -- HELLO or ACK events.
+    serviceCentralNetworkInbox(128)
     ensureModem()
     sendDiscovery(false)
     local layout, layoutError = analyzeLayout()
@@ -2020,67 +2114,77 @@ local function main()
     -- event before the main loop begins waiting for it.
     draw()
     local timer = os.startTimer(0.10)
-    while running do
-        local event, a, b, c = os.pullEvent()
-        if event == "rednet_message" and c == CONFIG.protocol then
-            receivedPacketCount = receivedPacketCount + 1
-            local ok, networkError = pcall(handleNetwork, a, b)
-            if not ok then
-                statusLine = "NETWORK HANDLER: " .. tostring(networkError)
-            end
-            -- HELLO/ACK processing can yield while sending WELCOME. Rearming
-            -- here prevents that work from consuming the only service timer.
-            timer = os.startTimer(0.10)
-        elseif event == "peripheral" or event == "peripheral_detach" then
-            modemName = nil
-            modemNames = {}
-            monitor, monitorName = nil, nil
-            ensureModem()
-            sendDiscovery(true)
-            ensureMonitor()
-            drawMonitor(true)
-            timer = os.startTimer(0.10)
-        elseif event == "monitor_touch" then
-            handleMonitorTouch(a, b, c)
-            -- handleMonitorTouch performs a full monitor redraw. Start a fresh
-            -- tick afterward in case that redraw consumed the prior timer.
-            timer = os.startTimer(0.10)
-        elseif event == "timer" and a == timer then
-            tick()
-            timer = os.startTimer(0.10)
-        elseif event == "key" then
-            local controlsLocked = firePlan ~= nil or loadPlan ~= nil
-            if a == keys.q then
-                if firePlan or loadPlan then cancelAllOrders("Orders cancelled; shutting down") end
-                running = false
-            elseif a == keys.c then
-                emergencyAbort()
-            elseif controlsLocked then
-                if a == keys.f then
-                    beginFireOrder()
-                else
-                    statusLine = "Order locked: only F FIRE, C EMERGENCY, or Q quit"
-                end
-            elseif a == keys.t then promptTarget()
-            elseif a == keys.r then promptRipple()
-            elseif a == keys.p then promptProjectile()
-            elseif a == keys.x then promptManualAim()
-            elseif a == keys.d then toggleAimMode()
-            elseif a == keys.left then adjustManualAim(-CONFIG.manual_yaw_step_deg, 0)
-            elseif a == keys.right then adjustManualAim(CONFIG.manual_yaw_step_deg, 0)
-            elseif a == keys.down then adjustManualAim(0, -CONFIG.manual_elevation_step_deg)
-            elseif a == keys.up then adjustManualAim(0, CONFIG.manual_elevation_step_deg)
-            elseif a == keys.s then cycleSide()
-            elseif a == keys.m then cycleFireMode()
-            elseif a == keys.g then cycleGunCountMode()
-            elseif a == keys.a then toggleArc()
-            elseif a == keys.f then beginFireOrder()
-            elseif a == keys.l then beginLoadOrder()
-            end
-            draw()
-            if running then timer = os.startTimer(0.10) end
+
+    local function networkLoop()
+        while running do
+            local _, sender, message, protocol = os.pullEvent("rednet_message")
+            -- Capture only. Monitor drawing, trajectory solving, and ACK
+            -- handling run elsewhere and cannot make reception miss an event.
+            receiveCentralNetworkMessage(sender, message, protocol)
         end
     end
+
+    local function controlLoop()
+        while running do
+            local event, a, b, c = os.pullEvent()
+            if event == NETWORK_INBOX_EVENT then
+                serviceCentralNetworkInbox(64)
+            elseif event == "peripheral" or event == "peripheral_detach" then
+                modemName = nil
+                modemNames = {}
+                monitor, monitorName = nil, nil
+                ensureModem()
+                sendDiscovery(true)
+                ensureMonitor()
+                drawMonitor(true)
+                timer = os.startTimer(0.10)
+            elseif event == "monitor_touch" then
+                handleMonitorTouch(a, b, c)
+                -- handleMonitorTouch performs a full monitor redraw. Start a
+                -- fresh tick afterward in case that redraw consumed the prior
+                -- timer.
+                timer = os.startTimer(0.10)
+            elseif event == "timer" and a == timer then
+                tick()
+                timer = os.startTimer(0.10)
+            elseif event == "key" then
+                local controlsLocked = firePlan ~= nil or loadPlan ~= nil
+                if a == keys.q then
+                    if firePlan or loadPlan then cancelAllOrders("Orders cancelled; shutting down") end
+                    running = false
+                    return
+                elseif a == keys.c then
+                    emergencyAbort()
+                elseif controlsLocked then
+                    if a == keys.f then
+                        beginFireOrder()
+                    else
+                        statusLine = "Order locked: only F FIRE, C EMERGENCY, or Q quit"
+                    end
+                elseif a == keys.t then promptTarget()
+                elseif a == keys.r then promptRipple()
+                elseif a == keys.p then promptProjectile()
+                elseif a == keys.x then promptManualAim()
+                elseif a == keys.d then toggleAimMode()
+                elseif a == keys.left then adjustManualAim(-CONFIG.manual_yaw_step_deg, 0)
+                elseif a == keys.right then adjustManualAim(CONFIG.manual_yaw_step_deg, 0)
+                elseif a == keys.down then adjustManualAim(0, -CONFIG.manual_elevation_step_deg)
+                elseif a == keys.up then adjustManualAim(0, CONFIG.manual_elevation_step_deg)
+                elseif a == keys.s then cycleSide()
+                elseif a == keys.m then cycleFireMode()
+                elseif a == keys.g then cycleGunCountMode()
+                elseif a == keys.a then toggleArc()
+                elseif a == keys.f then beginFireOrder()
+                elseif a == keys.l then beginLoadOrder()
+                end
+                draw()
+                if running then timer = os.startTimer(0.10) end
+            end
+        end
+    end
+
+    parallel.waitForAny(networkLoop, controlLoop)
+    running = false
     term.clear(); term.setCursorPos(1, 1)
     print("Central fire control stopped")
 end
