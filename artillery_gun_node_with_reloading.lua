@@ -13,6 +13,7 @@ local CONFIG = {
     install_startup = false,
     restart_after_crash_s = 3.0,
     heartbeat_s = 1.0,
+    display_refresh_s = 0.20,
     central_timeout_s = 8.0,
     fire_hold_s = 0.20,
     velocity_alpha = 0.70,
@@ -198,6 +199,10 @@ local modemNames = {}
 local receivedPacketCount = 0
 local lastReceivedType = nil
 local lastReceivedSender = nil
+local observedRednetCount = 0
+local lastObservedSender = nil
+local lastObservedProtocolMatches = nil
+local lastObservedVersion = nil
 local lastPose = nil
 local lastPoseAt = nil
 local velocity = {x = 0, y = 0, z = 0}
@@ -1452,6 +1457,20 @@ local function safeStopFiring(mount)
     if type(fireMethod) == "function" then pcall(fireMethod, false) end
 end
 
+local function processNetworkMessage(sender, message, protocol, mount, mountName)
+    observedRednetCount = observedRednetCount + 1
+    lastObservedSender = sender
+    lastObservedProtocolMatches = protocol == CONFIG.protocol
+    lastObservedVersion = type(message) == "table" and message.version or nil
+    if protocol ~= CONFIG.protocol then return end
+    handleMessage(sender, message, mount, mountName)
+    if emergencyStopRequested then
+        safeStopFiring(mount)
+        firing, fireOffTimer = false, nil
+        emergencyStopRequested = false
+    end
+end
+
 local function pruneCompletedOrders()
     local cutoff = nowMs() - 60000
     for orderId, completedAt in pairs(completedOrders) do
@@ -1487,18 +1506,21 @@ end
 
 local function draw(mount, mountName)
     local width, height = term.getSize()
-    local pose = currentPose(mount)
+    -- sendHello refreshes lastPose every heartbeat. Reusing it here avoids
+    -- making a yielding Sable peripheral call on every display frame.
+    local pose = lastPose or currentPose(mount)
     term.clear(); term.setCursorPos(1, 1)
     print("=== Phoenix Artillery Gun Node ===")
     print(string.format("Computer:%d  Label:%s", os.getComputerID(), os.getComputerLabel() or "none"))
     print("Mount: " .. tostring(mount and (mountName or "online") or "OFFLINE"))
-    local receiveSummary = lastReceivedType
-        and (tostring(lastReceivedSender) .. ":" .. lastReceivedType:sub(1, 10))
-        or "-"
-    print(string.format("Central:%s M:%s(%d) Auth:%s RX:%d/%s",
+    local observedFrom = lastObservedSender and tostring(lastObservedSender) or "-"
+    local protocolState = lastObservedProtocolMatches == nil and "-"
+        or lastObservedProtocolMatches and "Y" or "N"
+    print(string.format("C:%s M:%s(%d) A:%s NET:%d/%s P:%s V:%s RX:%d",
         tostring(centralId or "searching"), modemName and "ON" or "OFF",
         #modemNames, CONFIG.security_enabled and "ON" or "OFF",
-        receivedPacketCount, receiveSummary))
+        observedRednetCount, observedFrom, protocolState,
+        tostring(lastObservedVersion or "-"), receivedPacketCount))
     local mountConfig, profileName = resolvedMountConfig()
     print(string.format("Broadside:%s Profile:%s Enabled:%s",
         tostring(assignedSide), tostring(profileName), CONFIG.gun_enabled and "YES" or "NO"))
@@ -1577,63 +1599,69 @@ local function main()
     enableMount(mount)
     sendHello(mount, mountName)
     local heartbeatTimer = os.startTimer(CONFIG.heartbeat_s)
-    local displayTimer = os.startTimer(0.10)
+    local displayTimer = os.startTimer(CONFIG.display_refresh_s)
     draw(mount, mountName)
 
-    while running do
-        local event, a, b, c = os.pullEvent()
-        if event == "rednet_message" and c == CONFIG.protocol then
-            handleMessage(a, b, mount, mountName)
-            if emergencyStopRequested then
-                safeStopFiring(mount)
-                firing, fireOffTimer = false, nil
-                emergencyStopRequested = false
-            end
-        elseif event == "timer" then
-            if a == heartbeatTimer then
+    local function networkLoop()
+        while running do
+            local _, sender, message, protocol = os.pullEvent("rednet_message")
+            processNetworkMessage(sender, message, protocol, mount, mountName)
+        end
+    end
+
+    local function controlLoop()
+        while running do
+            local event, a = os.pullEvent()
+            if event == "timer" then
+                if a == heartbeatTimer then
+                    local foundMount, foundName = findMount()
+                    if foundMount ~= mount then enableMount(foundMount) end
+                    mount, mountName = foundMount, foundName
+                    ensureModem()
+                    sendHello(mount, mountName)
+                    pruneCompletedOrders()
+                    heartbeatTimer = os.startTimer(CONFIG.heartbeat_s)
+                elseif a == displayTimer then
+                    serviceLoader()
+                    serviceFire(mount)
+                    draw(mount, mountName)
+                    displayTimer = os.startTimer(CONFIG.display_refresh_s)
+                elseif a == fireOffTimer then
+                    safeStopFiring(mount)
+                    firing, fireOffTimer = false, nil
+                end
+            elseif event == "peripheral" or event == "peripheral_detach" then
                 local foundMount, foundName = findMount()
                 if foundMount ~= mount then enableMount(foundMount) end
                 mount, mountName = foundMount, foundName
+                modemName = nil
+                modemNames = {}
+                loaderOnline, loaderSourceName, loaderDepotName = false, nil, nil
                 ensureModem()
+                resolveLoaderInventories(true)
                 sendHello(mount, mountName)
-                pruneCompletedOrders()
-                heartbeatTimer = os.startTimer(CONFIG.heartbeat_s)
-            elseif a == displayTimer then
-                serviceLoader()
-                serviceFire(mount)
-                draw(mount, mountName)
-                displayTimer = os.startTimer(0.05)
-            elseif a == fireOffTimer then
-                safeStopFiring(mount)
-                firing, fireOffTimer = false, nil
-            end
-        elseif event == "peripheral" or event == "peripheral_detach" then
-            local foundMount, foundName = findMount()
-            if foundMount ~= mount then enableMount(foundMount) end
-            mount, mountName = foundMount, foundName
-            modemName = nil
-            modemNames = {}
-            loaderOnline, loaderSourceName, loaderDepotName = false, nil, nil
-            ensureModem()
-            resolveLoaderInventories(true)
-            sendHello(mount, mountName)
-        elseif event == "key" then
-            if a == keys.q then
-                running = false
-            elseif a == keys.u then
-                if loaderJob or pendingFire or firing then
-                    lastError = "Cannot mark empty while loader/fire order active"
+            elseif event == "key" then
+                if a == keys.q then
+                    running = false
+                    return
+                elseif a == keys.u then
+                    if loaderJob or pendingFire or firing then
+                        lastError = "Cannot mark empty while loader/fire order active"
+                    else
+                        loadedProjectile = nil
+                        loaderState, loaderError = "EMPTY", nil
+                        saveLoadedProjectile()
+                        lastCommand = "Operator marked cannon EMPTY"
+                    end
                 else
-                    loadedProjectile = nil
-                    loaderState, loaderError = "EMPTY", nil
-                    saveLoadedProjectile()
-                    lastCommand = "Operator marked cannon EMPTY"
+                    applyNudge(mount, a)
                 end
-            else
-                applyNudge(mount, a)
             end
         end
     end
+
+    parallel.waitForAny(networkLoop, controlLoop)
+    running = false
     safeStopFiring(mount)
     term.clear(); term.setCursorPos(1, 1)
     print("Gun node stopped")
