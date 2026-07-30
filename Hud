@@ -1,0 +1,855 @@
+-- Phoenix helm navigation display.
+-- Designed for one 3-wide x 1-high advanced-monitor multiblock.
+
+local CONFIG = {
+    monitor_text_scale = 0.5,
+    graphical_min_width = 50,
+    graphical_min_height = 10,
+    update_interval_s = 0.10,
+    velocity_smoothing = 0.72,
+    turn_rate_smoothing = 0.75,
+    maximum_speed_gauge_mps = 40,
+    maximum_vertical_speed_gauge_mps = 10,
+    maximum_reasonable_speed_mps = 250,
+    -- Sable's reported forward axis is opposite this ship's bow. If a future
+    -- build mounts the helm computer differently, tune this single value.
+    heading_offset_deg = 180,
+    altitude_tape_step_m = 10,
+    stale_after_s = 1.5,
+    install_startup = true,
+    restart_after_crash_s = 3,
+    sable_offset_x = 0,
+    sable_offset_y = 0,
+    sable_offset_z = 0,
+}
+
+local monitor
+local monitorName
+local lastPose
+local lastPoseAt
+local lastGoodPoseAt
+local lastTerminalDrawAt = 0
+local velocity = {x = 0, y = 0, z = 0}
+local turnRate = 0
+local navigation
+local status = "Waiting for Sable pose"
+local running = true
+
+local LARGE_GLYPHS = {
+    ["0"] = {"###", "# #", "# #", "# #", "###"},
+    ["1"] = {" # ", "## ", " # ", " # ", "###"},
+    ["2"] = {"###", "  #", "###", "#  ", "###"},
+    ["3"] = {"###", "  #", "###", "  #", "###"},
+    ["4"] = {"# #", "# #", "###", "  #", "  #"},
+    ["5"] = {"###", "#  ", "###", "  #", "###"},
+    ["6"] = {"###", "#  ", "###", "# #", "###"},
+    ["7"] = {"###", "  #", "  #", "  #", "  #"},
+    ["8"] = {"###", "# #", "###", "# #", "###"},
+    ["9"] = {"###", "# #", "###", "  #", "###"},
+    ["-"] = {"   ", "   ", "###", "   ", "   "},
+    ["+"] = {"   ", " # ", "###", " # ", "   "},
+}
+
+local COMPASS_16 = {
+    "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+    "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW",
+}
+
+local function nowMs()
+    return os.epoch("utc")
+end
+
+local function clamp(value, minimum, maximum)
+    if value < minimum then return minimum end
+    if value > maximum then return maximum end
+    return value
+end
+
+local function wrap360(angle)
+    return ((angle % 360) + 360) % 360
+end
+
+local function signedAngle(angle)
+    return ((angle + 180) % 360) - 180
+end
+
+local function round(value)
+    if value >= 0 then return math.floor(value + 0.5) end
+    return math.ceil(value - 0.5)
+end
+
+local function copyQuaternion(orientation)
+    if type(orientation) ~= "table" or type(orientation.v) ~= "table" then return nil end
+    local w, x, y, z = orientation.a, orientation.v.x, orientation.v.y, orientation.v.z
+    if type(w) ~= "number" or type(x) ~= "number"
+        or type(y) ~= "number" or type(z) ~= "number" then return nil end
+    local length = math.sqrt(w * w + x * x + y * y + z * z)
+    if length < 1e-9 then return nil end
+    return {a = w / length, v = {x = x / length, y = y / length, z = z / length}}
+end
+
+local function rotateVector(q, vector)
+    local ux, uy, uz = q.v.x, q.v.y, q.v.z
+    local tx = 2 * (uy * vector.z - uz * vector.y)
+    local ty = 2 * (uz * vector.x - ux * vector.z)
+    local tz = 2 * (ux * vector.y - uy * vector.x)
+    return {
+        x = vector.x + q.a * tx + (uy * tz - uz * ty),
+        y = vector.y + q.a * ty + (uz * tx - ux * tz),
+        z = vector.z + q.a * tz + (ux * ty - uy * tx),
+    }
+end
+
+local function dot(a, b)
+    return a.x * b.x + a.y * b.y + a.z * b.z
+end
+
+local function cross(a, b)
+    return {
+        x = a.y * b.z - a.z * b.y,
+        y = a.z * b.x - a.x * b.z,
+        z = a.x * b.y - a.y * b.x,
+    }
+end
+
+local function normalize(vector)
+    local length = math.sqrt(dot(vector, vector))
+    if length < 1e-9 then return nil end
+    return {x = vector.x / length, y = vector.y / length, z = vector.z / length}
+end
+
+local function orientationAngles(orientation)
+    -- Sable's contraption-local +X axis is the bow/forward axis.
+    local forward = rotateVector(orientation, {x = 1, y = 0, z = 0})
+    local localUp = rotateVector(orientation, {x = 0, y = 1, z = 0})
+    local heading = wrap360(
+        math.atan2(forward.x, -forward.z) * 180 / math.pi
+            + CONFIG.heading_offset_deg
+    )
+    local pitch = math.atan2(
+        forward.y,
+        math.sqrt(forward.x * forward.x + forward.z * forward.z)
+    ) * 180 / math.pi
+
+    local horizontalRight = normalize(cross(forward, {x = 0, y = 1, z = 0}))
+    local roll = 0
+    if horizontalRight then
+        local referenceUp = normalize(cross(horizontalRight, forward))
+        if referenceUp then
+            roll = math.atan2(dot(localUp, horizontalRight), dot(localUp, referenceUp))
+                * 180 / math.pi
+        end
+    end
+    return heading, pitch, roll
+end
+
+local function getSablePose()
+    if type(sublevel) ~= "table" or type(sublevel.getLogicalPose) ~= "function" then
+        return nil, "Sable sublevel API unavailable"
+    end
+    local ok, pose = pcall(sublevel.getLogicalPose)
+    if not ok then return nil, "Sable error: " .. tostring(pose) end
+    if type(pose) ~= "table" or type(pose.position) ~= "table" then
+        return nil, "Sable returned no position"
+    end
+    local position = pose.position
+    if type(position.x) ~= "number" or type(position.y) ~= "number"
+        or type(position.z) ~= "number" then return nil, "Invalid Sable position" end
+    local orientation = copyQuaternion(pose.orientation)
+    if not orientation then return nil, "Sable returned no orientation" end
+    local heading, pitch, roll = orientationAngles(orientation)
+    return {
+        position = {
+            x = position.x + CONFIG.sable_offset_x,
+            y = position.y + CONFIG.sable_offset_y,
+            z = position.z + CONFIG.sable_offset_z,
+        },
+        orientation = orientation,
+        heading = heading,
+        pitch = pitch,
+        roll = roll,
+    }
+end
+
+local function compassPoint(heading)
+    local index = math.floor((wrap360(heading) + 11.25) / 22.5) % 16 + 1
+    return COMPASS_16[index]
+end
+
+local function courseFromVelocity(horizontalSpeed)
+    if horizontalSpeed < 0.15 then return nil end
+    return wrap360(math.atan2(velocity.x, -velocity.z) * 180 / math.pi)
+end
+
+local function sampleNavigation()
+    local sampledAt = nowMs()
+    local pose, poseError = getSablePose()
+    if not pose then
+        status = poseError
+        navigation = nil
+        return
+    end
+
+    if lastPose and lastPoseAt and sampledAt > lastPoseAt then
+        local elapsed = (sampledAt - lastPoseAt) / 1000
+        if elapsed <= CONFIG.stale_after_s * 2 then
+            local raw = {
+                x = (pose.position.x - lastPose.position.x) / elapsed,
+                y = (pose.position.y - lastPose.position.y) / elapsed,
+                z = (pose.position.z - lastPose.position.z) / elapsed,
+            }
+            local rawSpeed = math.sqrt(raw.x * raw.x + raw.y * raw.y + raw.z * raw.z)
+            if rawSpeed <= CONFIG.maximum_reasonable_speed_mps then
+                local oldWeight = clamp(CONFIG.velocity_smoothing, 0, 0.99)
+                velocity.x = oldWeight * velocity.x + (1 - oldWeight) * raw.x
+                velocity.y = oldWeight * velocity.y + (1 - oldWeight) * raw.y
+                velocity.z = oldWeight * velocity.z + (1 - oldWeight) * raw.z
+                local rawTurnRate = signedAngle(pose.heading - lastPose.heading) / elapsed
+                local turnWeight = clamp(CONFIG.turn_rate_smoothing, 0, 0.99)
+                turnRate = turnWeight * turnRate + (1 - turnWeight) * rawTurnRate
+            else
+                velocity = {x = 0, y = 0, z = 0}
+                turnRate = 0
+            end
+        else
+            velocity = {x = 0, y = 0, z = 0}
+            turnRate = 0
+        end
+    end
+
+    local horizontalSpeed = math.sqrt(velocity.x * velocity.x + velocity.z * velocity.z)
+    local totalSpeed = math.sqrt(
+        velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z
+    )
+    local course = courseFromVelocity(horizontalSpeed)
+    navigation = {
+        position = pose.position,
+        heading = pose.heading,
+        compass = compassPoint(pose.heading),
+        pitch = pose.pitch,
+        roll = pose.roll,
+        horizontalSpeed = horizontalSpeed,
+        totalSpeed = totalSpeed,
+        verticalSpeed = velocity.y,
+        course = course,
+        turnRate = turnRate,
+        sampledAt = sampledAt,
+    }
+    lastPose, lastPoseAt, lastGoodPoseAt = pose, sampledAt, sampledAt
+    status = "SABLE ONLINE"
+end
+
+local function ensureStartupLauncher()
+    if not CONFIG.install_startup then return true end
+    local startupDirectory = "/startup"
+    local startupPath = startupDirectory .. "/phoenix_helm_display.lua"
+    local program = shell.resolve(shell.getRunningProgram() or "helm_display.lua")
+    local content = table.concat({
+        "-- Installed automatically by Phoenix helm display.",
+        "local program = " .. string.format("%q", program),
+        "local restartDelay = " .. tostring(CONFIG.restart_after_crash_s),
+        "if not fs.exists(program) then",
+        "    printError('Missing ' .. program)",
+        "    return",
+        "end",
+        "while true do",
+        "    local completedNormally = shell.run(program)",
+        "    if completedNormally then return end",
+        "    printError('Helm display stopped unexpectedly; restarting in ' .. restartDelay .. 's')",
+        "    sleep(restartDelay)",
+        "end",
+        "",
+    }, "\n")
+    local ok, startupError = pcall(function()
+        if fs.exists(startupDirectory) and not fs.isDir(startupDirectory) then
+            error(startupDirectory .. " exists but is not a directory")
+        end
+        if not fs.exists(startupDirectory) then fs.makeDir(startupDirectory) end
+        local existing
+        if fs.exists(startupPath) then
+            local reader = fs.open(startupPath, "r")
+            if reader then existing = reader.readAll(); reader.close() end
+        end
+        if existing ~= content then
+            local writer = assert(fs.open(startupPath, "w"))
+            writer.write(content)
+            writer.close()
+        end
+    end)
+    if not ok then return nil, tostring(startupError) end
+    return true
+end
+
+local function findLargestMonitor()
+    local best, bestName, bestArea
+    local ok, names = pcall(peripheral.getNames)
+    if not ok then return nil, nil end
+    for _, name in ipairs(names) do
+        local typeOk, peripheralType = pcall(peripheral.getType, name)
+        if typeOk and peripheralType == "monitor" then
+            local wrapOk, candidate = pcall(peripheral.wrap, name)
+            if wrapOk and candidate then
+                pcall(candidate.setTextScale, CONFIG.monitor_text_scale)
+                local sizeOk, width, height = pcall(candidate.getSize)
+                if sizeOk and width and height then
+                    local area = width * height
+                    if not bestArea or area > bestArea then
+                        best, bestName, bestArea = candidate, name, area
+                    end
+                end
+            end
+        end
+    end
+    return best, bestName
+end
+
+local function acquireMonitor()
+    local found, name = findLargestMonitor()
+    monitor, monitorName = found, name
+    if not monitor then return false end
+    pcall(function()
+        monitor.setTextScale(CONFIG.monitor_text_scale)
+        monitor.setCursorBlink(false)
+    end)
+    return true
+end
+
+local function writeAt(target, x, y, text, foreground, background)
+    local width, height = target.getSize()
+    if y < 1 or y > height or x > width then return end
+    text = tostring(text or "")
+    if x < 1 then
+        text = text:sub(2 - x)
+        x = 1
+    end
+    if #text > width - x + 1 then text = text:sub(1, width - x + 1) end
+    if #text == 0 then return end
+    target.setCursorPos(x, y)
+    if foreground then target.setTextColor(foreground) end
+    if background then target.setBackgroundColor(background) end
+    target.write(text)
+end
+
+local function fill(target, x, y, width, height, character, foreground, background)
+    if width <= 0 or height <= 0 then return end
+    local line = string.rep(character or " ", width)
+    for row = y, y + height - 1 do writeAt(target, x, row, line, foreground, background) end
+end
+
+local function centered(target, x, y, width, text, foreground, background)
+    text = tostring(text)
+    local start = x + math.max(0, math.floor((width - #text) / 2))
+    writeAt(target, start, y, text, foreground, background)
+end
+
+local function largeText(target, x, y, width, text, foreground, background)
+    text = tostring(text)
+    local renderedWidth = #text * 4 - 1
+    local start = x + math.max(0, math.floor((width - renderedWidth) / 2))
+    for row = 1, 5 do
+        local pieces = {}
+        for character in text:gmatch(".") do
+            local glyph = LARGE_GLYPHS[character] or {"   ", "   ", "   ", "   ", "   "}
+            pieces[#pieces + 1] = glyph[row]
+        end
+        writeAt(target, start, y + row - 1, table.concat(pieces, " "), foreground, background)
+    end
+end
+
+local function gauge(target, x, y, width, ratio, fillColor, centeredGauge)
+    if width < 5 then return end
+    ratio = clamp(ratio, centeredGauge and -1 or 0, 1)
+    writeAt(target, x, y, "[", colors.lightGray, colors.black)
+    writeAt(target, x + width - 1, y, "]", colors.lightGray, colors.black)
+    local inner = width - 2
+    fill(target, x + 1, y, inner, 1, "-", colors.gray, colors.black)
+    if centeredGauge then
+        local middle = x + 1 + math.floor((inner - 1) / 2)
+        writeAt(target, middle, y, "|", colors.white, colors.black)
+        local amount = round(math.abs(ratio) * math.floor(inner / 2))
+        if ratio > 0 then
+            fill(target, middle + 1, y, amount, 1, "#", fillColor, colors.black)
+        elseif ratio < 0 then
+            fill(target, middle - amount, y, amount, 1, "#", fillColor, colors.black)
+        end
+    else
+        fill(target, x + 1, y, round(ratio * inner), 1, "#", fillColor, colors.black)
+    end
+end
+
+local function plot(target, x, y, character, foreground, background)
+    writeAt(target, round(x), round(y), character or "*", foreground, background)
+end
+
+local function drawLine(target, x1, y1, x2, y2, character, foreground)
+    local dx, dy = x2 - x1, y2 - y1
+    local steps = math.max(math.abs(dx), math.abs(dy))
+    if steps < 1 then
+        plot(target, x1, y1, character, foreground, colors.black)
+        return
+    end
+    for step = 0, steps do
+        local fraction = step / steps
+        plot(target, x1 + dx * fraction, y1 + dy * fraction,
+            character, foreground, colors.black)
+    end
+end
+
+local function drawEllipse(target, centerX, centerY, radiusX, radiusY, foreground)
+    for degrees = 0, 356, 4 do
+        local radians = degrees * math.pi / 180
+        plot(target,
+            centerX + math.cos(radians) * radiusX,
+            centerY + math.sin(radians) * radiusY,
+            ".", foreground, colors.black)
+    end
+end
+
+local function compassArrow(heading)
+    local index = math.floor((wrap360(heading) + 22.5) / 45) % 8 + 1
+    return ({"^", "/", ">", "\\", "v", "/", "<", "\\"})[index]
+end
+
+local function drawSpeedometer(target, panel, data)
+    local contentWidth = panel.width - 1
+    local centerX = panel.x + math.floor(contentWidth / 2)
+    local centerY, radiusX, radiusY = 10, math.min(10, math.floor(contentWidth / 2) - 2), 6
+    local ratio = clamp(data.horizontalSpeed / CONFIG.maximum_speed_gauge_mps, 0, 1)
+
+    for step = 0, 80 do
+        local arcRatio = step / 80
+        local radians = (150 + arcRatio * 240) * math.pi / 180
+        local arcColor = arcRatio < 0.65 and colors.lime
+            or arcRatio < 0.85 and colors.yellow or colors.red
+        plot(target,
+            centerX + math.cos(radians) * radiusX,
+            centerY + math.sin(radians) * radiusY,
+            arcRatio * 80 % 8 < 1 and "|" or ".", arcColor, colors.black)
+    end
+
+    local needleRadians = (150 + ratio * 240) * math.pi / 180
+    local needleX = centerX + math.cos(needleRadians) * (radiusX - 2)
+    local needleY = centerY + math.sin(needleRadians) * (radiusY - 1)
+    drawLine(target, centerX, centerY, needleX, needleY, "*", colors.white)
+    plot(target, centerX, centerY, "O", colors.yellow, colors.black)
+
+    writeAt(target, panel.x + 2, 13, "0", colors.lightGray, colors.black)
+    writeAt(target, panel.x + contentWidth - 4, 13,
+        tostring(CONFIG.maximum_speed_gauge_mps), colors.lightGray, colors.black)
+    centered(target, panel.x, 8, contentWidth,
+        string.format("%.1f", data.horizontalSpeed), colors.white, colors.black)
+    centered(target, panel.x, 9, contentWidth, "m/s", colors.lightGray, colors.black)
+
+    writeAt(target, panel.x + 2, 15,
+        string.format("TOTAL %5.1f  V/S %+.1f", data.totalSpeed, data.verticalSpeed),
+        colors.lightGray, colors.black)
+    local courseText = data.course
+        and string.format("%03d %s", round(data.course) % 360, compassPoint(data.course))
+        or "--- STOP"
+    writeAt(target, panel.x + 2, 16, "TRACK " .. courseText, colors.cyan, colors.black)
+    writeAt(target, panel.x + 2, 17,
+        string.format("TURN  %+.1f deg/s", data.turnRate), colors.lightGray, colors.black)
+end
+
+local function drawVirtualCompass(target, panel, data)
+    local contentWidth = panel.width - 1
+    local centerX = panel.x + math.floor(contentWidth / 2)
+    local centerY, radiusX, radiusY = 9, math.min(10, math.floor(contentWidth / 2) - 2), 6
+    drawEllipse(target, centerX, centerY, radiusX, radiusY, colors.cyan)
+
+    local headingRadians = data.heading * math.pi / 180
+    local headX = centerX + math.sin(headingRadians) * (radiusX - 2)
+    local headY = centerY - math.cos(headingRadians) * (radiusY - 1)
+    local tailX = centerX - math.sin(headingRadians) * (radiusX - 4)
+    local tailY = centerY + math.cos(headingRadians) * (radiusY - 2)
+    drawLine(target, centerX, centerY, tailX, tailY, ".", colors.red)
+    drawLine(target, centerX, centerY, headX, headY, "*", colors.yellow)
+
+    if data.course then
+        local courseRadians = data.course * math.pi / 180
+        plot(target,
+            centerX + math.sin(courseRadians) * (radiusX - 1),
+            centerY - math.cos(courseRadians) * (radiusY - 1),
+            "o", colors.lime, colors.black)
+    end
+
+    writeAt(target, centerX, centerY - radiusY, "N", colors.red, colors.black)
+    writeAt(target, centerX + radiusX, centerY, "E", colors.white, colors.black)
+    writeAt(target, centerX, centerY + radiusY, "S", colors.white, colors.black)
+    writeAt(target, centerX - radiusX, centerY, "W", colors.white, colors.black)
+    plot(target, headX, headY, compassArrow(data.heading), colors.yellow, colors.black)
+    plot(target, centerX, centerY, "+", colors.white, colors.black)
+
+    centered(target, panel.x, 16, contentWidth,
+        string.format("%06.2f deg  %s", data.heading, data.compass),
+        colors.white, colors.black)
+    centered(target, panel.x, 17, contentWidth,
+        string.format("PITCH %+.1f   ROLL %+.1f", data.pitch, data.roll),
+        colors.lightGray, colors.black)
+end
+
+local function drawAltitudeTape(target, panel, data)
+    local contentWidth = panel.width
+    local centerY = 9
+    local labelX = panel.x + 2
+    local tapeX = panel.x + 12
+    local vsiX = panel.x + contentWidth - 3
+    local stepMeters = math.max(1, CONFIG.altitude_tape_step_m)
+    local centerTick = round(data.position.y / stepMeters) * stepMeters
+
+    for row = 3, 15 do
+        local tickAltitude = centerTick + (centerY - row) * stepMeters
+        local major = tickAltitude % (stepMeters * 5) == 0
+        writeAt(target, labelX, row, string.format("%6d", tickAltitude),
+            major and colors.white or colors.lightGray, colors.black)
+        writeAt(target, tapeX, row, major and "----" or "--",
+            major and colors.orange or colors.gray, colors.black)
+    end
+
+    fill(target, tapeX + 5, 3, 1, 13, "|", colors.gray, colors.black)
+    fill(target, vsiX, 3, 1, 13, ":", colors.gray, colors.black)
+    writeAt(target, vsiX - 1, centerY, "-", colors.white, colors.black)
+    local verticalRatio = clamp(
+        data.verticalSpeed / CONFIG.maximum_vertical_speed_gauge_mps, -1, 1
+    )
+    local verticalAmount = round(math.abs(verticalRatio) * 6)
+    local verticalColor = verticalRatio >= 0 and colors.lime or colors.red
+    if verticalRatio > 0 then
+        for offset = 1, verticalAmount do
+            writeAt(target, vsiX, centerY - offset, "#", verticalColor, colors.black)
+        end
+        writeAt(target, vsiX, centerY - verticalAmount - 1, "^", verticalColor, colors.black)
+    elseif verticalRatio < 0 then
+        for offset = 1, verticalAmount do
+            writeAt(target, vsiX, centerY + offset, "#", verticalColor, colors.black)
+        end
+        writeAt(target, vsiX, centerY + verticalAmount + 1, "v", verticalColor, colors.black)
+    end
+
+    -- Clear the middle tick and replace it with an unambiguous live-altitude
+    -- bug. Keep the far-right climb-rate scale visible.
+    fill(target, panel.x + 1, centerY, contentWidth - 5, 1,
+        " ", colors.white, colors.black)
+    centered(target, panel.x + 1, centerY, contentWidth - 5,
+        string.format("> ALT %.1f m <", data.position.y), colors.yellow, colors.black)
+    writeAt(target, vsiX - 1, centerY, "-", colors.white, colors.black)
+    writeAt(target, vsiX, centerY, "|", colors.white, colors.black)
+
+    writeAt(target, panel.x + 2, 16,
+        string.format("X %8.1f  Z %8.1f", data.position.x, data.position.z),
+        colors.lightGray, colors.black)
+    writeAt(target, panel.x + 2, 17,
+        string.format("CLIMB %+.2f m/s", data.verticalSpeed),
+        data.verticalSpeed >= 0 and colors.lime or colors.red, colors.black)
+end
+
+local function drawUnavailable(target, width, height)
+    target.setBackgroundColor(colors.black)
+    target.clear()
+    centered(target, 1, math.max(1, math.floor(height / 2) - 1), width,
+        "NAVIGATION DATA UNAVAILABLE", colors.red, colors.black)
+    centered(target, 1, math.max(2, math.floor(height / 2) + 1), width,
+        status, colors.orange, colors.black)
+    centered(target, 1, height, width,
+        "Phoenix Helm  |  waiting for Sable", colors.lightGray, colors.gray)
+end
+
+local function drawCompact(target, width, height, data)
+    target.setBackgroundColor(colors.black)
+    target.clear()
+    centered(target, 1, 1, width, "PHOENIX HELM", colors.white, colors.blue)
+    writeAt(target, 2, 3, string.format("HDG %03d %s", round(data.heading) % 360, data.compass),
+        colors.cyan, colors.black)
+    writeAt(target, 2, 5, string.format("SPD %.1f m/s", data.horizontalSpeed),
+        colors.lime, colors.black)
+    writeAt(target, 2, 7, string.format("ALT %.1f m", data.position.y),
+        colors.orange, colors.black)
+    if height >= 9 then
+        writeAt(target, 2, 9, string.format("X %.1f  Z %.1f", data.position.x, data.position.z),
+            colors.lightGray, colors.black)
+    end
+    centered(target, 1, height, width, "SABLE ONLINE", colors.lime, colors.gray)
+end
+
+local function drawWideShortDashboard(target, width, height, data)
+    target.setBackgroundColor(colors.black)
+    target.setTextColor(colors.white)
+    target.clear()
+
+    fill(target, 1, height, width, 1, " ", colors.white, colors.gray)
+
+    local firstEnd = math.floor(width / 3)
+    local secondEnd = math.floor(width * 2 / 3)
+    local panels = {
+        {x = 1, width = firstEnd},
+        {x = firstEnd + 1, width = secondEnd - firstEnd},
+        {x = secondEnd + 1, width = width - secondEnd},
+    }
+    local left, centerPanel, right = panels[1], panels[2], panels[3]
+    fill(target, firstEnd, 1, 1, height - 1, "|", colors.gray, colors.black)
+    fill(target, secondEnd, 1, 1, height - 1, "|", colors.gray, colors.black)
+
+    fill(target, left.x, 1, left.width - 1, 1, " ", colors.black, colors.green)
+    centered(target, left.x, 1, left.width - 1,
+        string.format("SPEED  %.1f m/s", data.horizontalSpeed),
+        colors.black, colors.green)
+    fill(target, centerPanel.x, 1, centerPanel.width - 1, 1,
+        " ", colors.black, colors.cyan)
+    centered(target, centerPanel.x, 1, centerPanel.width - 1,
+        string.format("COMPASS  %03d %s", round(data.heading) % 360, data.compass),
+        colors.black, colors.cyan)
+    fill(target, right.x, 1, right.width, 1, " ", colors.black, colors.orange)
+    centered(target, right.x, 1, right.width,
+        string.format("ALTITUDE  %.1f m", data.position.y),
+        colors.black, colors.orange)
+
+    -- Left: a compact color-zoned speedometer occupying the full monitor block.
+    local speedCenterX = left.x + math.floor((left.width - 1) / 2)
+    local speedCenterY = math.floor((height + 1) / 2)
+    local speedRadiusX = math.min(10, math.floor(left.width / 2) - 2)
+    local speedRadiusY = math.max(2, math.floor((height - 4) / 2))
+    local speedRatio = clamp(
+        data.horizontalSpeed / CONFIG.maximum_speed_gauge_mps, 0, 1
+    )
+    for step = 0, 72 do
+        local arcRatio = step / 72
+        local radians = (150 + arcRatio * 240) * math.pi / 180
+        local arcColor = arcRatio < 0.65 and colors.lime
+            or arcRatio < 0.85 and colors.yellow or colors.red
+        plot(target,
+            speedCenterX + math.cos(radians) * speedRadiusX,
+            speedCenterY + math.sin(radians) * speedRadiusY,
+            ".", arcColor, colors.black)
+    end
+    local speedNeedle = (150 + speedRatio * 240) * math.pi / 180
+    drawLine(target, speedCenterX, speedCenterY,
+        speedCenterX + math.cos(speedNeedle) * (speedRadiusX - 2),
+        speedCenterY + math.sin(speedNeedle) * (speedRadiusY - 1),
+        "*", colors.white)
+    plot(target, speedCenterX, speedCenterY, "O", colors.yellow, colors.black)
+    centered(target, left.x, speedCenterY - 1, left.width - 1,
+        string.format("%.1f", data.horizontalSpeed), colors.white, colors.black)
+    writeAt(target, left.x + 1, height - 1,
+        string.format("TOT %.1f  V/S %+.1f", data.totalSpeed, data.verticalSpeed),
+        colors.lightGray, colors.black)
+
+    -- Center: a real compass rose. Cardinal points stay fixed while the yellow
+    -- bow needle rotates; the green 'o' is course over ground when moving.
+    local compassCenterX = centerPanel.x + math.floor((centerPanel.width - 1) / 2)
+    local compassCenterY = math.floor((height + 1) / 2)
+    local compassRadiusX = math.min(9, math.floor(centerPanel.width / 2) - 3)
+    local compassRadiusY = math.max(2, math.floor((height - 4) / 2))
+    drawEllipse(target, compassCenterX, compassCenterY,
+        compassRadiusX, compassRadiusY, colors.cyan)
+    local headingRadians = data.heading * math.pi / 180
+    local headX = compassCenterX + math.sin(headingRadians) * (compassRadiusX - 2)
+    local headY = compassCenterY - math.cos(headingRadians) * (compassRadiusY - 1)
+    local tailX = compassCenterX - math.sin(headingRadians) * (compassRadiusX - 4)
+    local tailY = compassCenterY + math.cos(headingRadians) * (compassRadiusY - 2)
+    drawLine(target, compassCenterX, compassCenterY, tailX, tailY, ".", colors.red)
+    drawLine(target, compassCenterX, compassCenterY, headX, headY, "*", colors.yellow)
+    if data.course then
+        local courseRadians = data.course * math.pi / 180
+        plot(target,
+            compassCenterX + math.sin(courseRadians) * (compassRadiusX - 1),
+            compassCenterY - math.cos(courseRadians) * (compassRadiusY - 1),
+            "o", colors.lime, colors.black)
+    end
+    writeAt(target, compassCenterX, compassCenterY - compassRadiusY,
+        "N", colors.red, colors.black)
+    writeAt(target, compassCenterX + compassRadiusX, compassCenterY,
+        "E", colors.white, colors.black)
+    writeAt(target, compassCenterX, compassCenterY + compassRadiusY,
+        "S", colors.white, colors.black)
+    writeAt(target, compassCenterX - compassRadiusX, compassCenterY,
+        "W", colors.white, colors.black)
+    plot(target, headX, headY, compassArrow(data.heading), colors.yellow, colors.black)
+    plot(target, compassCenterX, compassCenterY, "+", colors.white, colors.black)
+    writeAt(target, centerPanel.x + 1, height - 1,
+        string.format("P%+.1f", data.pitch), colors.lightGray, colors.black)
+    local rollText = string.format("R%+.1f", data.roll)
+    writeAt(target, centerPanel.x + centerPanel.width - #rollText - 2, height - 1,
+        rollText, colors.lightGray, colors.black)
+
+    -- Right: compact moving altitude tape plus a vertical-speed bar.
+    local altitudeCenterY = compassCenterY
+    local altitudeLabelX = right.x + 1
+    local altitudeTapeX = right.x + 9
+    local vsiX = right.x + right.width - 2
+    local stepMeters = math.max(1, CONFIG.altitude_tape_step_m)
+    local centerTick = round(data.position.y / stepMeters) * stepMeters
+    for row = 2, height - 1 do
+        local tickAltitude = centerTick + (altitudeCenterY - row) * stepMeters
+        local major = tickAltitude % (stepMeters * 5) == 0
+        writeAt(target, altitudeLabelX, row, string.format("%6d", tickAltitude),
+            major and colors.white or colors.lightGray, colors.black)
+        writeAt(target, altitudeTapeX, row, major and "----" or "--",
+            major and colors.orange or colors.gray, colors.black)
+    end
+    fill(target, altitudeTapeX + 5, 2, 1, height - 2,
+        "|", colors.gray, colors.black)
+    fill(target, vsiX, 2, 1, height - 2, ":", colors.gray, colors.black)
+    local verticalRatio = clamp(
+        data.verticalSpeed / CONFIG.maximum_vertical_speed_gauge_mps, -1, 1
+    )
+    local verticalAmount = round(math.abs(verticalRatio) * 3)
+    local verticalColor = verticalRatio >= 0 and colors.lime or colors.red
+    for offset = 1, verticalAmount do
+        local row = altitudeCenterY - (verticalRatio >= 0 and offset or -offset)
+        writeAt(target, vsiX, row, "#", verticalColor, colors.black)
+    end
+    if verticalAmount > 0 then
+        local arrowRow = altitudeCenterY
+            - (verticalRatio >= 0 and verticalAmount + 1 or -verticalAmount - 1)
+        writeAt(target, vsiX, arrowRow,
+            verticalRatio >= 0 and "^" or "v", verticalColor, colors.black)
+    end
+    fill(target, right.x + 1, altitudeCenterY, right.width - 5, 1,
+        " ", colors.white, colors.black)
+    centered(target, right.x + 1, altitudeCenterY, right.width - 5,
+        string.format("> %.1f m <", data.position.y), colors.yellow, colors.black)
+    writeAt(target, vsiX - 1, altitudeCenterY, "-", colors.white, colors.black)
+    writeAt(target, vsiX, altitudeCenterY, "|", colors.white, colors.black)
+
+    local footer = string.format(
+        " X %.1f   Z %.1f   //   SABLE ONLINE ",
+        data.position.x, data.position.z
+    )
+    centered(target, 1, height, width, footer, colors.lime, colors.gray)
+end
+
+local function drawDashboard(target, width, height, data)
+    target.setBackgroundColor(colors.black)
+    target.setTextColor(colors.white)
+    target.clear()
+
+    fill(target, 1, 1, width, 1, " ", colors.white, colors.blue)
+    centered(target, 1, 1, width, "PHOENIX AIRSHIP  |  HELM NAVIGATION", colors.white, colors.blue)
+    fill(target, 1, height, width, 1, " ", colors.white, colors.gray)
+
+    local firstEnd = math.floor(width / 3)
+    local secondEnd = math.floor(width * 2 / 3)
+    local panels = {
+        {x = 1, width = firstEnd},
+        {x = firstEnd + 1, width = secondEnd - firstEnd},
+        {x = secondEnd + 1, width = width - secondEnd},
+    }
+    local left = panels[1]
+    local centerPanel = panels[2]
+    local right = panels[3]
+    fill(target, firstEnd, 2, 1, height - 2, "|", colors.gray, colors.black)
+    fill(target, secondEnd, 2, 1, height - 2, "|", colors.gray, colors.black)
+
+    fill(target, left.x, 2, left.width - 1, 1, " ", colors.black, colors.green)
+    centered(target, left.x, 2, left.width - 1,
+        "AIRSPEED  //  m/s", colors.black, colors.green)
+    fill(target, centerPanel.x, 2, centerPanel.width - 1, 1,
+        " ", colors.black, colors.cyan)
+    centered(target, centerPanel.x, 2, centerPanel.width - 1,
+        string.format("COMPASS  //  %03d %s",
+            round(data.heading) % 360, data.compass), colors.black, colors.cyan)
+    fill(target, right.x, 2, right.width, 1, " ", colors.black, colors.orange)
+    centered(target, right.x, 2, right.width,
+        "ALTITUDE  //  meters", colors.black, colors.orange)
+
+    drawSpeedometer(target, left, data)
+    drawVirtualCompass(target, centerPanel, data)
+    drawAltitudeTape(target, right, data)
+
+    local age = math.max(0, (nowMs() - data.sampledAt) / 1000)
+    local footer = string.format(
+        " SABLE ONLINE  |  %s  |  %.1f Hz  |  Q on computer to stop ",
+        monitorName or "monitor", 1 / CONFIG.update_interval_s
+    )
+    centered(target, 1, height, width, footer,
+        age <= CONFIG.stale_after_s and colors.lime or colors.red, colors.gray)
+end
+
+local function renderMonitor()
+    if not monitor and not acquireMonitor() then return end
+    local ok, renderError = pcall(function()
+        monitor.setTextScale(CONFIG.monitor_text_scale)
+        local width, height = monitor.getSize()
+        if not navigation then
+            drawUnavailable(monitor, width, height)
+        elseif width >= 60 and height >= 18 then
+            drawDashboard(monitor, width, height, navigation)
+        elseif width >= CONFIG.graphical_min_width
+            and height >= CONFIG.graphical_min_height then
+            drawWideShortDashboard(monitor, width, height, navigation)
+        else
+            drawCompact(monitor, width, height, navigation)
+        end
+    end)
+    if not ok then
+        status = "Monitor error: " .. tostring(renderError)
+        monitor, monitorName = nil, nil
+    end
+end
+
+local function renderTerminal(force)
+    local time = nowMs()
+    if not force and time - lastTerminalDrawAt < 1000 then return end
+    lastTerminalDrawAt = time
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.white)
+    term.clear()
+    term.setCursorPos(1, 1)
+    print("=== Phoenix Helm Navigation ===")
+    print("Monitor: " .. (monitorName or "not connected"))
+    print("Sable: " .. status)
+    if navigation then
+        print(string.format("Heading: %06.2f  %s", navigation.heading, navigation.compass))
+        print(string.format("Speed: %.2f m/s  Vertical: %+.2f",
+            navigation.horizontalSpeed, navigation.verticalSpeed))
+        print(string.format("Altitude: %.2f m", navigation.position.y))
+        print(string.format("Position: %.1f %.1f %.1f",
+            navigation.position.x, navigation.position.y, navigation.position.z))
+        print(string.format("Pitch/Roll: %+.2f / %+.2f",
+            navigation.pitch, navigation.roll))
+    end
+    print("")
+    print("Press Q to stop.")
+end
+
+local startupOk, startupError = ensureStartupLauncher()
+if not startupOk then status = "Startup install failed: " .. tostring(startupError) end
+acquireMonitor()
+sampleNavigation()
+renderMonitor()
+renderTerminal(true)
+
+local timer = os.startTimer(CONFIG.update_interval_s)
+while running do
+    local event = {os.pullEvent()}
+    if event[1] == "timer" and event[2] == timer then
+        sampleNavigation()
+        renderMonitor()
+        renderTerminal(false)
+        timer = os.startTimer(CONFIG.update_interval_s)
+    elseif event[1] == "monitor_resize" then
+        acquireMonitor()
+        renderMonitor()
+    elseif event[1] == "peripheral" or event[1] == "peripheral_detach" then
+        acquireMonitor()
+        renderMonitor()
+        renderTerminal(true)
+    elseif event[1] == "key" and event[2] == keys.q then
+        running = false
+    end
+end
+
+if monitor then
+    pcall(function()
+        monitor.setBackgroundColor(colors.black)
+        monitor.clear()
+        local width, height = monitor.getSize()
+        centered(monitor, 1, math.max(1, math.floor(height / 2)), width,
+            "HELM DISPLAY OFFLINE", colors.red, colors.black)
+    end)
+end
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)
+print("Phoenix helm display stopped.")
