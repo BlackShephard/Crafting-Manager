@@ -12,10 +12,11 @@ local CONFIG = {
     -- Keep false while the original gun-node startup launcher exists.
     install_startup = false,
     restart_after_crash_s = 3.0,
-    heartbeat_s = 1.0,
+    heartbeat_s = 2.0,
+    discovery_reply_min_s = 3.0,
     display_refresh_s = 0.20,
     control_tick_s = 0.10,
-    central_timeout_s = 8.0,
+    central_timeout_s = 15.0,
     monitor_text_scale = 0.5,
     fire_hold_s = 0.20,
     velocity_alpha = 0.70,
@@ -174,6 +175,7 @@ local MOUNT_PROFILE_KEYS = {
 
 local centralId = nil
 local centralLastSeen = 0
+local lastHelloAt = 0
 local assignedSide = CONFIG.side_override or "unassigned"
 local pendingFire = nil
 local loaderJob = nil
@@ -205,6 +207,8 @@ local modemNames = {}
 local receivedPacketCount = 0
 local lastReceivedType = nil
 local lastReceivedSender = nil
+local receivedOrderCount = 0
+local lastReceivedOrderType = nil
 local observedRednetCount = 0
 local lastObservedSender = nil
 local lastObservedProtocolMatches = nil
@@ -1405,7 +1409,7 @@ local function sendHello(mount, mountName)
     local pose = currentPose(mount)
     if not pose then
         lastError = "No Sable pose or cannon position"
-        safeBroadcast({
+        local sent = safeBroadcast({
             type = "status",
             version = CONFIG.protocol_version,
             ready = false,
@@ -1419,11 +1423,12 @@ local function sendHello(mount, mountName)
             loaderDepotNames = {loaderDepotNames[1], loaderDepotNames[2]},
             loaderError = loaderError,
         })
+        if sent then lastHelloAt = nowMs() end
         return
     end
     updateVelocity(pose)
     local label = os.getComputerLabel() or ("Gun " .. os.getComputerID())
-    safeBroadcast({
+    local sent = safeBroadcast({
         type = "hello",
         version = CONFIG.protocol_version,
         nodeId = os.getComputerID(),
@@ -1451,6 +1456,7 @@ local function sendHello(mount, mountName)
         loaderDepotNames = {loaderDepotNames[1], loaderDepotNames[2]},
         loaderError = loaderError,
     })
+    if sent then lastHelloAt = nowMs() end
 end
 
 local function cancelPendingForInvalidAim(errorMessage)
@@ -1470,11 +1476,23 @@ local function handleMessage(sender, message, mount, mountName)
     lastReceivedType = tostring(message.type or "?")
     lastReceivedSender = sender
     if message.type == "discover" then
-        if centralId and sender ~= centralId
-            and nowMs() - centralLastSeen < CONFIG.central_timeout_s * 1000 then
+        local now = nowMs()
+        if centralId == sender
+            and now - centralLastSeen < CONFIG.central_timeout_s * 1000 then
+            centralLastSeen = now
+            -- A registered node already sends periodic pose/status heartbeats.
+            -- Do not turn every background discovery into another registration
+            -- burst; only reply if a heartbeat is genuinely overdue.
+            if now - lastHelloAt >= CONFIG.discovery_reply_min_s * 1000 then
+                sendHello(mount, mountName)
+            end
             return
         end
-        centralId, centralLastSeen = sender, nowMs()
+        if centralId and sender ~= centralId
+            and now - centralLastSeen < CONFIG.central_timeout_s * 1000 then
+            return
+        end
+        centralId, centralLastSeen = sender, now
         lastCommand = "Central discovered; registering"
         sendHello(mount, mountName)
         return
@@ -1491,6 +1509,11 @@ local function handleMessage(sender, message, mount, mountName)
     end
     if centralId and sender ~= centralId and nowMs() - centralLastSeen < CONFIG.central_timeout_s * 1000 then return end
     centralId, centralLastSeen = sender, nowMs()
+    if message.type == "load" or message.type == "load_fire"
+        or message.type == "cancel" or message.type == "emergency_abort" then
+        receivedOrderCount = receivedOrderCount + 1
+        lastReceivedOrderType = message.type
+    end
 
     if message.type == "emergency_abort" then
         cancelNodeOrder(nil, true)
@@ -1805,10 +1828,12 @@ local function drawAttachedMonitor(mount, mountName)
             tostring(mount and (mountName or "online") or "OFFLINE")),
             colors.white, width)
         appendWrapped(lines, "", string.format(
-            "Central %s | Modems %d | NET %d/%s P:%s V:%s | RX %d | Queue %d Drop %d",
+            "Central %s | Modems %d | NET %d/%s P:%s V:%s | RX %d/%s | ORD %d/%s | Queue %d Drop %d",
             tostring(centralId or "searching"), #modemNames,
             observedRednetCount, observedFrom, protocolState,
             tostring(lastObservedVersion or "-"), receivedPacketCount,
+            tostring(lastReceivedType or "-"),
+            receivedOrderCount, tostring(lastReceivedOrderType or "-"),
             #networkInbox + (pendingAimPacket and 1 or 0)
                 + (pendingDiscoverPacket and 1 or 0)
                 + (pendingWelcomePacket and 1 or 0),
@@ -1911,11 +1936,13 @@ local function draw(mount, mountName)
     local observedFrom = lastObservedSender and tostring(lastObservedSender) or "-"
     local protocolState = lastObservedProtocolMatches == nil and "-"
         or lastObservedProtocolMatches and "Y" or "N"
-    print(string.format("C:%s M:%s(%d) A:%s NET:%d/%s P:%s V:%s RX:%d",
+    print(string.format("C:%s M:%s(%d) A:%s NET:%d/%s P:%s V:%s RX:%d/%s ORD:%d/%s",
         tostring(centralId or "searching"), modemName and "ON" or "OFF",
         #modemNames, CONFIG.security_enabled and "ON" or "OFF",
         observedRednetCount, observedFrom, protocolState,
-        tostring(lastObservedVersion or "-"), receivedPacketCount))
+        tostring(lastObservedVersion or "-"), receivedPacketCount,
+        tostring(lastReceivedType or "-"), receivedOrderCount,
+        tostring(lastReceivedOrderType or "-")))
     local mountConfig, profileName = resolvedMountConfig()
     print(string.format("Broadside:%s Profile:%s Enabled:%s",
         tostring(assignedSide), tostring(profileName), CONFIG.gun_enabled and "YES" or "NO"))
@@ -2004,7 +2031,11 @@ local function main()
     -- yield, and a timer armed before a large draw can be consumed before the
     -- control loop resumes, permanently stopping loader/heartbeat service.
     local serviceTimer = os.startTimer(CONFIG.control_tick_s)
-    local nextHeartbeatAt = nowMs() + CONFIG.heartbeat_s * 1000
+    -- Spread a mass boot across the heartbeat interval instead of making every
+    -- gun transmit on the same scheduler tick.
+    local heartbeatPhase = ((os.getComputerID() * 7919) % 1000) / 1000
+    local nextHeartbeatAt = nowMs()
+        + CONFIG.heartbeat_s * 1000 * (0.5 + heartbeatPhase)
     local nextDisplayAt = nowMs() + CONFIG.display_refresh_s * 1000
 
     local function networkLoop()
