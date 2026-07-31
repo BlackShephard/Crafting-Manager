@@ -61,7 +61,7 @@ local CONFIG = {
     min_yaw_from_center_deg = -23,
     max_yaw_from_center_deg = 23,
     yaw_offset_deg = 0,
-    pitch_offset_deg = 90,
+    pitch_offset_deg = 0,
     invert_yaw = false,
     invert_pitch = false,
     min_elevation_deg = -4,
@@ -143,14 +143,14 @@ local SIDE_MOUNT_PROFILES = {
     port = {
         auto_yaw_offset = -90,
         -- yaw_offset_deg = 0,
-        -- pitch_offset_deg = 90,
+        -- pitch_offset_deg = 0,
         -- invert_yaw = false,
         -- invert_pitch = false,
     },
     starboard = {
         auto_yaw_offset = 90,
         -- yaw_offset_deg = 0,
-        -- pitch_offset_deg = 90,
+        -- pitch_offset_deg = 0,
         -- invert_yaw = false,
         -- invert_pitch = false,
     },
@@ -159,7 +159,7 @@ local SIDE_MOUNT_PROFILES = {
 -- Optional final overrides for one unusual mount. Entries may use a numeric
 -- computer ID or a computer label. ID overrides are applied last.
 local GUN_MOUNT_OVERRIDES = {
-    -- [8] = {yaw_offset_deg = 0.5, pitch_offset_deg = 89.8},
+    -- [8] = {yaw_offset_deg = 0.5, pitch_offset_deg = 0},
     -- ["Port bow"] = {invert_yaw = true},
 }
 
