@@ -227,6 +227,20 @@ local lastPose = nil
 local lastPoseAt = nil
 local velocity = {x = 0, y = 0, z = 0}
 
+-- Only these packet types are valid from central fire control to a gun node.
+-- Gun HELLO/status/ACK packets share the protocol but are peer traffic and
+-- must never be allowed to claim centralId on another gun.
+local CENTRAL_MESSAGE_TYPES = {
+    discover = true,
+    welcome = true,
+    aim = true,
+    load = true,
+    load_fire = true,
+    fire = true,
+    cancel = true,
+    emergency_abort = true,
+}
+
 local function nowMs()
     return os.epoch("utc")
 end
@@ -945,6 +959,11 @@ local function safeBroadcast(message)
     return sent ~= false
 end
 
+local function sendToCentralOrBroadcast(message)
+    if centralId then return safeSend(centralId, message) end
+    return safeBroadcast(message)
+end
+
 local function enableMount(mount)
     if not mount then return false end
     local ok, errorMessage = pcall(function()
@@ -1409,7 +1428,7 @@ local function sendHello(mount, mountName)
     local pose = currentPose(mount)
     if not pose then
         lastError = "No Sable pose or cannon position"
-        local sent = safeBroadcast({
+        local sent = sendToCentralOrBroadcast({
             type = "status",
             version = CONFIG.protocol_version,
             ready = false,
@@ -1428,7 +1447,7 @@ local function sendHello(mount, mountName)
     end
     updateVelocity(pose)
     local label = os.getComputerLabel() or ("Gun " .. os.getComputerID())
-    local sent = safeBroadcast({
+    local sent = sendToCentralOrBroadcast({
         type = "hello",
         version = CONFIG.protocol_version,
         nodeId = os.getComputerID(),
@@ -1471,15 +1490,21 @@ end
 
 local function handleMessage(sender, message, mount, mountName)
     if type(message) ~= "table" or message.version ~= CONFIG.protocol_version then return end
+    if not CENTRAL_MESSAGE_TYPES[message.type] then return end
     if not authenticateIncoming(sender, message) then return end
-    receivedPacketCount = receivedPacketCount + 1
-    lastReceivedType = tostring(message.type or "?")
-    lastReceivedSender = sender
+
+    local function recordAcceptedMessage()
+        receivedPacketCount = receivedPacketCount + 1
+        lastReceivedType = tostring(message.type or "?")
+        lastReceivedSender = sender
+    end
+
     if message.type == "discover" then
         local now = nowMs()
         if centralId == sender
             and now - centralLastSeen < CONFIG.central_timeout_s * 1000 then
             centralLastSeen = now
+            recordAcceptedMessage()
             -- A registered node already sends periodic pose/status heartbeats.
             -- Do not turn every background discovery into another registration
             -- burst; only reply if a heartbeat is genuinely overdue.
@@ -1493,6 +1518,7 @@ local function handleMessage(sender, message, mount, mountName)
             return
         end
         centralId, centralLastSeen = sender, now
+        recordAcceptedMessage()
         lastCommand = "Central discovered; registering"
         sendHello(mount, mountName)
         return
@@ -1500,6 +1526,7 @@ local function handleMessage(sender, message, mount, mountName)
     if message.type == "welcome" then
         if centralId and sender ~= centralId and nowMs() - centralLastSeen < CONFIG.central_timeout_s * 1000 then return end
         centralId, centralLastSeen = sender, nowMs()
+        recordAcceptedMessage()
         assignedSide = message.side or assignedSide
         lastCommand = "Registered with central " .. sender
         -- WELCOME is registration/keepalive metadata, not an aim command.
@@ -1507,8 +1534,13 @@ local function handleMessage(sender, message, mount, mountName)
         -- and mount call, which could bury real LOAD packets behind tracking.
         return
     end
-    if centralId and sender ~= centralId and nowMs() - centralLastSeen < CONFIG.central_timeout_s * 1000 then return end
-    centralId, centralLastSeen = sender, nowMs()
+
+    -- A command is valid only after DISCOVER/WELCOME established the sender
+    -- as this node's central computer. Never let AIM/LOAD (or peer gun HELLO
+    -- traffic) silently replace that identity.
+    if not centralId or sender ~= centralId then return end
+    centralLastSeen = nowMs()
+    recordAcceptedMessage()
     if message.type == "load" or message.type == "load_fire"
         or message.type == "cancel" or message.type == "emergency_abort" then
         receivedOrderCount = receivedOrderCount + 1
@@ -1692,6 +1724,7 @@ local function receiveNetworkMessage(sender, message, protocol)
     lastObservedProtocolMatches = protocol == CONFIG.protocol
     lastObservedVersion = type(message) == "table" and message.version or nil
     if protocol ~= CONFIG.protocol then return end
+    if type(message) ~= "table" or not CENTRAL_MESSAGE_TYPES[message.type] then return end
 
     local packet = {sender = sender, message = message}
     local messageType = type(message) == "table" and message.type or nil
