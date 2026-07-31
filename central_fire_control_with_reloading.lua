@@ -14,8 +14,8 @@ local CONFIG = {
     install_startup = false,
     restart_after_crash_s = 3.0,
     node_timeout_s = 6.0,
-    discovery_interval_s = 2.0,
-    welcome_refresh_s = 5.0,
+    discovery_interval_s = 15.0,
+    welcome_refresh_s = 10.0,
     aim_update_s = 0.75,
     fire_resend_s = 0.25,
     fire_refresh_s = 2.0,
@@ -928,6 +928,8 @@ local function handleNetwork(sender, message)
         node.chaserNumber = message.chaserNumber
         node.stationOverride = message.stationOverride
         node.enabled = message.enabled ~= false
+        node.side = node.batteryRole == "bow_chaser" and "bow" or node.sideHint
+        node.station = batteryStation(node)
         node.batteryLabel = batteryLabel(node)
         node.mountName = message.mountName
         node.mountOnline = message.mountOnline ~= false and message.ready ~= false
@@ -947,8 +949,7 @@ local function handleNetwork(sender, message)
         elseif node.mountOnline == false then
             statusLine = string.format("Gun %d inactive: %s", sender, node.hardwareError or "cannon mount offline")
         end
-        lastLayout = analyzeLayout()
-        -- Heartbeats arrive every second. A WELCOME every heartbeat adds no
+        -- Heartbeats arrive frequently. A WELCOME every heartbeat adds no
         -- registration value and can crowd command traffic on a large battery.
         if not wasKnown or not node.lastWelcomeAt
             or nowMs() - node.lastWelcomeAt >= CONFIG.welcome_refresh_s * 1000
@@ -2124,12 +2125,20 @@ local function main()
         end
     end
 
+    local function commandLoop()
+        while running do
+            os.pullEvent(NETWORK_INBOX_EVENT)
+            -- HELLO/status/ACK processing can yield while replying WELCOME or
+            -- updating a large registry. Keep it out of controlLoop so heavy
+            -- multi-gun traffic cannot consume/starve the LOAD/FIRE tick.
+            serviceCentralNetworkInbox(64)
+        end
+    end
+
     local function controlLoop()
         while running do
             local event, a, b, c = os.pullEvent()
-            if event == NETWORK_INBOX_EVENT then
-                serviceCentralNetworkInbox(64)
-            elseif event == "peripheral" or event == "peripheral_detach" then
+            if event == "peripheral" or event == "peripheral_detach" then
                 modemName = nil
                 modemNames = {}
                 monitor, monitorName = nil, nil
@@ -2183,7 +2192,7 @@ local function main()
         end
     end
 
-    parallel.waitForAny(networkLoop, controlLoop)
+    parallel.waitForAny(networkLoop, commandLoop, controlLoop)
     running = false
     term.clear(); term.setCursorPos(1, 1)
     print("Central fire control stopped")
